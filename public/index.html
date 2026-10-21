@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>SSH Keywarden</title>
+<link rel="stylesheet" href="/vendor/xterm.css" />
+<link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">
+    <span class="logo">🔐</span>
+    <span class="title">SSH Keywarden</span>
+    <span class="ver" id="version">v—</span>
+  </div>
+
+  <div class="conn">
+    <select id="hostSelect" title="选择主机"></select>
+    <button id="btnConnect" class="primary">连接</button>
+    <button id="btnTerm" class="ghost dim" title="先连接服务器才能开终端">终端</button>
+    <button id="btnHosts" class="icon-btn" title="管理主机">⚙</button>
+    <button id="btnSettings" class="icon-btn" title="本地密钥目录">📁</button>
+    <span id="connState" class="state-dot" title="未连接"></span>
+  </div>
+</header>
+
+<main class="layout">
+  <section class="panel server-panel">
+    <div class="panel-head">
+      <div class="head-left">
+        <h2>服务器密钥</h2>
+        <div class="meta meta-server" id="serverMeta">未连接</div>
+        <!-- 信息条由 renderServerMeta() 动态渲染：主机（带复制按钮）/ 路径（可复制）/ 系统名 -->
+      </div>
+      <div class="head-right">
+        <button id="btnRefresh" class="ghost" disabled>刷新</button>
+        <button id="btnAdd" class="ghost" disabled>＋ 新增密钥</button>
+        <button id="btnDelete" class="ghost danger" disabled>删除选中 <span id="selCount" class="pill hidden">0</span></button>
+        <button id="btnDisconnect" class="ghost" disabled>断开</button>
+      </div>
+    </div>
+
+    <div id="notice" class="notice hidden"></div>
+
+    <div class="table-wrap">
+      <table class="key-table">
+        <thead>
+          <tr>
+            <th class="col-check"><input type="checkbox" id="checkAll" title="全选" /></th>
+            <th class="col-type">类型</th>
+            <th class="col-fp">指纹 (SHA256)</th>
+            <th class="col-status">状态</th>
+            <th class="col-comment">注释 / 来源</th>
+            <th class="col-local">本地匹配</th>
+            <th class="col-op">操作</th>
+          </tr>
+        </thead>
+        <tbody id="keyBody"></tbody>
+      </table>
+      <div class="empty" id="emptyState">
+        <div class="empty-icon">🗝️</div>
+        <p>还没有连接服务器</p>
+        <p class="hint">先在右上角选择（或新建）一台主机，点「连接」查看它允许哪些钥匙登录。</p>
+      </div>
+    </div>
+
+    <div id="termSplitter" class="term-splitter hidden" title="拖动调整高度"></div>
+
+    <div id="termPanel" class="term-panel hidden">
+      <div class="term-head">
+        <span class="term-title"><i id="termDot" class="term-dot" title="未连接"></i>终端</span>
+        <span class="term-status hidden" id="termStatus"></span>
+        <span style="flex:1"></span>
+        <button id="termClear" class="link-btn">清屏</button>
+        <button id="termClose" class="icon-btn" title="收起终端（会话保留）">✕</button>
+      </div>
+      <div id="termBody" class="term-body"></div>
+    </div>
+  </section>
+
+  <aside class="panel local-panel">
+    <div class="panel-head">
+      <div class="head-left">
+        <h2>本地密钥库</h2>
+        <div class="meta" id="localDir">—</div>
+      </div>
+      <div class="head-right">
+        <button id="btnRescan" class="icon-btn" title="重新扫描">⟳</button>
+      </div>
+    </div>
+    <ul id="localList" class="local-list"></ul>
+    <div class="local-errors" id="localErrors"></div>
+  </aside>
+</main>
+
+<footer class="logbar">
+  <div class="log-head">
+    <span>操作日志</span>
+    <button id="btnClearLog" class="link-btn">清空</button>
+  </div>
+  <div id="log" class="log-body"></div>
+</footer>
+
+<div id="modalRoot"></div>
+<div id="toastRoot" class="toast-root"></div>
+
+<script src="/vendor/xterm.js"></script>
+<script src="/vendor/addon-fit.js"></script>
+<script src="/app.js"></script>
+</body>
+</html>
