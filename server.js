@@ -21,6 +21,7 @@ const sshd = require('./src/sshd');
 const { APP_VERSION } = require('./src/version');
 const { parseAuthorizedKeys, keyItems, renderWithout, appendKey } = require('./src/authorized');
 const { scanKeys } = require('./src/localkeys');
+const knownhosts = require('./src/knownhosts');
 const ssh = require('./src/ssh');
 
 const PORT = Number(process.env.PORT) || 7791;
@@ -325,6 +326,27 @@ function fingerprintOfPrivateKey(privateKey, passphrase) {
 /* 业务：连接 / 读 / 增 / 换 / 删                                       */
 /* ------------------------------------------------------------------ */
 
+/**
+ * 生成 hostVerifier：首次连接抛 HOSTKEY_UNKNOWN 交前端确认，
+ * 指纹变化抛 HOSTKEY_CHANGED；用户确认后带 trustFingerprint 重试才会写入。
+ */
+function makeHostVerifier(target, trustFingerprint) {
+  return (keyBlob) => {
+    const res = knownhosts.verify({
+      host: target.host,
+      port: target.port || 22,
+      blob: keyBlob,
+      trustFingerprint,
+    });
+    if (res.status === 'trusted') {
+      log(`首次连接，已记录主机指纹：${res.current.host}:${res.current.port} ${res.current.fingerprint}`);
+    } else if (res.status === 'updated') {
+      log(`主机指纹已更新：${res.current.host}:${res.current.port} ${res.previous.fingerprint} → ${res.current.fingerprint}`);
+    }
+    return true;
+  };
+}
+
 async function openSession(body) {
   let target;
   if (body.hostId) {
@@ -360,6 +382,7 @@ async function openSession(body) {
     port: target.port || 22,
     username: target.username,
     ...auth,
+    hostVerifier: makeHostVerifier(target, body.trustFingerprint),
   };
 
   let client;
@@ -375,6 +398,7 @@ async function openSession(body) {
         port: target.port || 22,
         username: target.username,
         password: auth.password,
+        hostVerifier: makeHostVerifier(target, body.trustFingerprint),
       });
       authMethod = 'password';
     } else {
@@ -501,6 +525,7 @@ async function verifyLogin(session, privateKey, passphrase) {
     username: session.target.username,
     privateKey,
     passphrase,
+    hostVerifier: makeHostVerifier(session.target),
   });
   try {
     const res = await ssh.exec(client, 'printf __LOGIN_OK__');
@@ -1011,7 +1036,8 @@ const MIME = {
   '.ico': 'image/x-icon',
 };
 
-const ALLOWED_STATIC = new Set(['/index.html', '/app.js', '/style.css']);
+const ALLOWED_STATIC = new Set(['/index.html', '/style.css']);
+const ALLOWED_JS = /^\/js\/[A-Za-z0-9._-]+\.js$/;
 const ALLOWED_VENDOR = /^\/vendor\/[A-Za-z0-9._-]+\.(js|css)$/;
 
 function hostAllowed(req) {
@@ -1019,10 +1045,16 @@ function hostAllowed(req) {
   return h === `127.0.0.1:${PORT}` || h === `localhost:${PORT}` || h === `127.0.0.1` || h === `localhost`;
 }
 
+function tokenEqual(value) {
+  if (typeof value !== 'string') return false;
+  const a = Buffer.from(value);
+  const b = Buffer.from(TOKEN);
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
+}
+
 function cookieValid(req) {
   const c = parseCookies(req.headers.cookie);
-  if (c.kk === TOKEN) return true;
-  return req.headers['x-token'] === TOKEN;
+  return tokenEqual(c.kw) || tokenEqual(req.headers['x-token']);
 }
 
 async function handleApi(req, res, pathname, url) {
@@ -1207,7 +1239,7 @@ const server = http.createServer(async (req, res) => {
 
     // 静态资源
     if (pathname === '/') pathname = '/index.html';
-    if (!ALLOWED_STATIC.has(pathname) && !ALLOWED_VENDOR.test(pathname)) {
+    if (!ALLOWED_STATIC.has(pathname) && !ALLOWED_JS.test(pathname) && !ALLOWED_VENDOR.test(pathname)) {
       res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
       return res.end('Not found');
     }
@@ -1223,7 +1255,7 @@ const server = http.createServer(async (req, res) => {
       'X-Content-Type-Options': 'nosniff',
     };
     if (pathname === '/index.html') {
-      headers['Set-Cookie'] = `kk=${TOKEN}; Path=/; HttpOnly; SameSite=Strict`;
+      headers['Set-Cookie'] = `kw=${TOKEN}; Path=/; HttpOnly; SameSite=Strict`;
     }
     res.writeHead(200, headers);
     res.end(fs.readFileSync(filePath));
@@ -1234,6 +1266,9 @@ const server = http.createServer(async (req, res) => {
     const message = isSessionError || !lost ? e.message : 'SSH 连接已断开（服务器可能主动断开了空闲连接），请重新连接后再操作';
     log(lost ? '会话已断开:' : '请求处理失败:', e.message);
     if (!res.headersSent) {
+      if (e.code === 'HOSTKEY_UNKNOWN' || e.code === 'HOSTKEY_CHANGED') {
+        return fail(res, e.message, 409, { code: e.code, details: e.details });
+      }
       return fail(res, message, lost ? 409 : 400, lost ? { code: 'SESSION_LOST' } : {});
     }
     try {

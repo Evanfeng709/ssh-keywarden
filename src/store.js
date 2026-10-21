@@ -8,7 +8,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 
-const DATA_DIR = process.env.KK_DATA_DIR || path.join(__dirname, '..', 'data');
+const DATA_DIR = process.env.KW_DATA_DIR || path.join(__dirname, '..', 'data');
 const CONFIG_PATH = path.join(DATA_DIR, 'config.json');
 
 const DEFAULT_CONFIG = {

@@ -9,6 +9,10 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 
+// 指纹库等模块在 require 时解析数据目录，必须先指到临时目录再加载
+const TEST_DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'kw-test-'));
+process.env.KW_DATA_DIR = TEST_DATA_DIR;
+
 const keygen = require('../src/keygen');
 const { parseAuthorizedKeys, keyItems, renderWithout, appendKey } = require('../src/authorized');
 const { scanKeys } = require('../src/localkeys');
@@ -139,7 +143,7 @@ test('空文件解析不报错', () => {
 console.log('\n[本地密钥库扫描]');
 
 test('扫描临时目录能找到私钥与公钥并配对指纹', () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kk-test-'));
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kw-test-'));
   fs.mkdirSync(path.join(dir, 'sub'), { recursive: true });
   fs.writeFileSync(path.join(dir, 'id_test'), ed1.privateKeyPem);
   fs.writeFileSync(path.join(dir, 'id_test.pub'), `${ed1.publicKeyLine}\n`);
@@ -282,5 +286,104 @@ test('RSA 带 passphrase 也能加密并通过 ssh2 回读', () => {
   assert.strictEqual(key.type, 'ssh-rsa');
 });
 
+console.log('\n[主机指纹 known_hosts]');
+
+const knownhosts = require('../src/knownhosts');
+
+function catchErr(fn) {
+  try {
+    fn();
+    return null;
+  } catch (e) {
+    return e;
+  }
+}
+const blobOf = (k) => Buffer.from(k.publicKeyLine.split(/\s+/)[1], 'base64');
+
+const hostK1 = keygen.generateEd25519('host-1');
+const hostK2 = keygen.generateEd25519('host-2');
+
+test('指纹格式与 keygen 一致（SHA256:base64，无 = 填充）', () => {
+  const fp = knownhosts.fingerprintOfBlob(blobOf(hostK1));
+  assert.strictEqual(fp, hostK1.fingerprint);
+  assert.match(fp, /^SHA256:[A-Za-z0-9+/]{43}$/);
+  assert.strictEqual(knownhosts.keyTypeOfBlob(blobOf(hostK1)), 'ssh-ed25519');
+});
+
+test('首次连接未确认 → HOSTKEY_UNKNOWN，带指纹详情', () => {
+  const e = catchErr(() => knownhosts.verify({ host: 'unknown.example', port: 22, blob: blobOf(hostK1) }));
+  assert.ok(e, '应抛错');
+  assert.strictEqual(e.code, 'HOSTKEY_UNKNOWN');
+  assert.strictEqual(e.details.fingerprint, hostK1.fingerprint);
+  assert.strictEqual(knownhosts.get('unknown.example', 22), null, '未被信任时不能落盘');
+});
+
+test('确认指纹后才写入；再次连接为 match', () => {
+  const blob = blobOf(hostK1);
+  const first = knownhosts.verify({ host: 'trust.example', port: 2222, blob, trustFingerprint: hostK1.fingerprint });
+  assert.strictEqual(first.status, 'trusted');
+  assert.ok(knownhosts.get('trust.example', 2222), '确认后应写入指纹库');
+  const second = knownhosts.verify({ host: 'trust.example', port: 2222, blob });
+  assert.strictEqual(second.status, 'match');
+});
+
+test('主机密钥变化 → HOSTKEY_CHANGED，且带旧指纹', () => {
+  const e = catchErr(() => knownhosts.verify({ host: 'trust.example', port: 2222, blob: blobOf(hostK2) }));
+  assert.ok(e, '应抛错');
+  assert.strictEqual(e.code, 'HOSTKEY_CHANGED');
+  assert.strictEqual(e.details.previousFingerprint, hostK1.fingerprint);
+  assert.strictEqual(e.details.fingerprint, hostK2.fingerprint);
+});
+
+test('确认变化后覆盖记录，旧指纹失效', () => {
+  const blob = blobOf(hostK2);
+  const res = knownhosts.verify({
+    host: 'trust.example',
+    port: 2222,
+    blob,
+    trustFingerprint: hostK2.fingerprint,
+  });
+  assert.strictEqual(res.status, 'updated');
+  assert.strictEqual(res.previous.fingerprint, hostK1.fingerprint);
+  assert.strictEqual(knownhosts.get('trust.example', 2222).fingerprint, hostK2.fingerprint);
+});
+
+test('主机名大小写与默认端口归一', () => {
+  knownhosts.save('Case.Example', 22, blobOf(hostK1));
+  assert.ok(knownhosts.get('case.example', 22));
+  assert.ok(knownhosts.get('CASE.EXAMPLE'));
+});
+
+console.log('\n[版本一致性]');
+
+const version = require('../src/version');
+const pkg = require('../package.json');
+const lock = require('../package-lock.json');
+const changelog = fs.readFileSync(path.join(__dirname, '..', 'CHANGELOG.md'), 'utf8');
+
+test('APP_VERSION 符合 vYYYY.MM.DD.N', () => {
+  assert.match(version.APP_VERSION, /^v\d{4}\.\d{2}\.\d{2}\.\d+$/);
+});
+
+test('package.json / package-lock 与 version.js 同步', () => {
+  assert.strictEqual(pkg.version, version.APP_VERSION_SEMVER);
+  assert.strictEqual(lock.version, version.APP_VERSION_SEMVER);
+  assert.strictEqual(lock.packages[''].version, version.APP_VERSION_SEMVER);
+  assert.strictEqual(pkg.name, 'ssh-keywarden');
+  assert.strictEqual(lock.packages[''].name, pkg.name);
+});
+
+test('CHANGELOG 有当前版本条目', () => {
+  assert.ok(changelog.includes(`## ${version.APP_VERSION} `), 'CHANGELOG 缺少当前版本条目');
+});
+
+test('锁文件全部指向官方 npm registry', () => {
+  const raw = fs.readFileSync(path.join(__dirname, '..', 'package-lock.json'), 'utf8');
+  assert.ok(!/registry\.npmmirror\.com/.test(raw), '锁文件里残留镜像源地址');
+});
+
 console.log(`\n结果：${passed} 通过，${failed} 失败\n`);
+try {
+  fs.rmSync(TEST_DATA_DIR, { recursive: true, force: true });
+} catch {}
 process.exit(failed ? 1 : 0);

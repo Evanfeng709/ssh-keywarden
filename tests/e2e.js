@@ -21,7 +21,7 @@ const { parseAuthorizedKeys } = require('../src/authorized');
 /* 1. 临时环境                                                         */
 /* ------------------------------------------------------------------ */
 
-const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'kk-e2e-'));
+const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'kw-e2e-'));
 const DATA_DIR = path.join(TMP, 'data');
 const KEYS_DIR = path.join(TMP, 'keys');
 fs.mkdirSync(DATA_DIR, { recursive: true });
@@ -119,9 +119,9 @@ function mockExec(cmd, stdin) {
     return { out: '__OK__' };
   }
 
-  if (c.includes('__KK_MISSING__')) {
+  if (c.includes('__KW_MISSING__')) {
     const r = c.match(/base64 < '([^']+)'/);
-    if (!r || !FS.has(r[1])) return { out: '__KK_MISSING__' };
+    if (!r || !FS.has(r[1])) return { out: '__KW_MISSING__' };
     return { out: Buffer.from(FS.get(r[1]), 'utf8').toString('base64') };
   }
 
@@ -145,25 +145,28 @@ function mockExec(cmd, stdin) {
   return { out: '', err: `mock: 未实现的命令 -> ${c}`, code: 127 };
 }
 
-const hostKey = keygen.generateEd25519('mock-host').privateKeyPem;
+const hostKeyPair = keygen.generateEd25519('mock-host');
+const hostKey = hostKeyPair.privateKeyPem;
+const HOST_KEY_FP = keygen.parsePublicKeyLine(hostKeyPair.publicKeyLine).fingerprint;
 
 const mockClients = [];
 const mockServer = new Server({ hostKeys: [hostKey] }, (client) => {
   mockClients.push(client);
+  client.on('error', () => {}); // 指纹被拒时 KEX 中断，ssh2 连接对象会 emit error
   client.on('authentication', (ctx) => {
     if (ctx.method === 'password') {
       const ok = ctx.password === MOCK_PASSWORD;
-      if (process.env.KK_DEBUG) console.log(`  [mock] password ${ok ? '接受' : '拒绝'}`);
+      if (process.env.KW_DEBUG) console.log(`  [mock] password ${ok ? '接受' : '拒绝'}`);
       return ok ? ctx.accept() : ctx.reject(['publickey', 'password']);
     }
     if (ctx.method !== 'publickey') {
-      if (process.env.KK_DEBUG) console.log('  [mock] 拒绝认证方式:', ctx.method);
+      if (process.env.KW_DEBUG) console.log('  [mock] 拒绝认证方式:', ctx.method);
       return ctx.reject();
     }
     const fp = fpOfCtxKey(ctx.key);
     const parsed = parseAuthorizedKeys(FS.get(AUTH_PATH) || '');
     const allowed = parsed.items.some((i) => i.kind === 'key' && i.fingerprint === fp);
-    if (process.env.KK_DEBUG) {
+    if (process.env.KW_DEBUG) {
       console.log(`  [mock] publickey ${ctx.key.algo} fp=${fp} sig=${ctx.signature ? 'yes' : 'no'} allowed=${allowed}`);
       parsed.items.filter((i) => i.kind === 'key').forEach((i) => console.log(`       文件里有 ${i.fingerprint}`));
     }
@@ -213,6 +216,10 @@ const mockServer = new Server({ hostKeys: [hostKey] }, (client) => {
     });
   });
 });
+
+// 指纹被用户拒绝时客户端会在 KEX 中途断开；ssh2 的 mock server 会因此 emit error，
+// 不接住就会变成未捕获异常（真实服务器不会因此崩溃）
+mockServer.on('error', () => {});
 
 /* ------------------------------------------------------------------ */
 /* 3. 断言工具                                                         */
@@ -280,7 +287,7 @@ function request(method, urlPath, body) {
           } catch {
             /* 首页是 HTML */
           }
-          resolve({ status: res.statusCode, json, raw });
+          resolve({ status: res.statusCode, json, raw, headers: res.headers });
         });
       }
     );
@@ -313,7 +320,7 @@ async function main() {
     })
   );
 
-  process.env.KK_DATA_DIR = DATA_DIR;
+  process.env.KW_DATA_DIR = DATA_DIR;
   process.env.PORT = String(18000 + Math.floor(Math.random() * 500));
 
   await new Promise((resolve) => mockServer.listen(0, '127.0.0.1', resolve));
@@ -340,6 +347,35 @@ async function main() {
   test('没有会话 Cookie 时 API 返回 401', () => assert.strictEqual(unauth.status, 401));
   COOKIE = savedCookie;
 
+  console.log('\n[前端静态资源]');
+  const mainJs = await request('GET', '/js/main.js');
+  test('ES module 拆分后的入口能正常访问', () => {
+    assert.strictEqual(mainJs.status, 200);
+    assert.ok(mainJs.raw.includes("from './core.js'"));
+  });
+  const coreJs = await request('GET', '/js/core.js');
+  test('子模块能正常访问且 MIME 为 JavaScript', () => {
+    assert.strictEqual(coreJs.status, 200);
+    assert.match(coreJs.headers['content-type'], /javascript/);
+  });
+  const oldBundle = await request('GET', '/app.js');
+  test('旧的单文件 app.js 不再对外提供', () => assert.strictEqual(oldBundle.status, 404));
+
+  console.log('\n[主机指纹 TOFU]');
+  const firstTry = await request('POST', '/api/connect', {
+    host: '127.0.0.1',
+    port: mockPort,
+    username: 'tester',
+    identityFile: keyAPath,
+    name: 'mock',
+  });
+  test('首次连接未确认指纹时被拦下，并返回服务器指纹', () => {
+    assert.strictEqual(firstTry.status, 409);
+    assert.strictEqual(firstTry.json.code, 'HOSTKEY_UNKNOWN');
+    assert.strictEqual(firstTry.json.details.fingerprint, HOST_KEY_FP);
+    assert.strictEqual(firstTry.json.details.keyType, 'ssh-ed25519');
+  });
+
   console.log('\n[查看]');
   const s1 = await call('/api/connect', {
     host: '127.0.0.1',
@@ -347,6 +383,7 @@ async function main() {
     username: 'tester',
     identityFile: keyAPath,
     name: 'mock',
+    trustFingerprint: HOST_KEY_FP,
   });
 
   test('连上后能读到服务器信息', () => {
@@ -707,14 +744,14 @@ async function main() {
   await new Promise((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error('终端超时（5s）')), 5000);
     termWs.on('open', () => {
-      if (process.env.KK_DEBUG) console.log('  [term] ws open');
+      if (process.env.KW_DEBUG) console.log('  [term] ws open');
       termWs.send(JSON.stringify({ t: 'in', d: Buffer.from('echo hi\n', 'utf8').toString('base64') }));
     });
     termWs.on('unexpected-response', (req, res) => {
-      if (process.env.KK_DEBUG) console.log('  [term] 握手被拒:', res.statusCode);
+      if (process.env.KW_DEBUG) console.log('  [term] 握手被拒:', res.statusCode);
     });
     termWs.on('message', (raw) => {
-      if (process.env.KK_DEBUG) console.log('  [term] <-', raw.toString().slice(0, 90));
+      if (process.env.KW_DEBUG) console.log('  [term] <-', raw.toString().slice(0, 90));
       const msg = JSON.parse(raw.toString());
       if (msg.t === 'out') {
         termOut.push(Buffer.from(msg.d, 'base64').toString('utf8'));

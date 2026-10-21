@@ -1,5 +1,7 @@
 # SSH Keywarden
 
+[![test](https://github.com/Evanfeng709/ssh-keywarden/actions/workflows/test.yml/badge.svg)](https://github.com/Evanfeng709/ssh-keywarden/actions/workflows/test.yml)
+
 本地 SSH 授权密钥管理台 —— 一个跑在自己电脑上的小网页，用来打理服务器上的 `~/.ssh/authorized_keys`。
 
 解决的就是这几件烦心事：服务器上堆了一堆不知道是谁的钥匙、换机器后想把登录钥匙换掉、想给新设备加一把、想把早就不用的删掉。
@@ -28,6 +30,8 @@ npm start        # → http://127.0.0.1:7791
 
 换端口：`set PORT=7792 && node server.js`
 
+> 依赖锁定在 npm 官方源；国内网络慢时可加镜像安装：`npm install --registry=https://registry.npmmirror.com`
+
 首次启动会自动做两件事，省得手抄配置：
 
 1. 读 `~/.ssh/config`，把里面的 Host 导入成主机列表；
@@ -38,6 +42,7 @@ npm start        # → http://127.0.0.1:7791
 这是能改服务器登录凭据的工具，所以边界卡得比较死：
 
 - **只监听 `127.0.0.1`**，并严格校验 `Host` 头（挡 DNS rebinding）；
+- **首次连接确认主机指纹**：指纹保存在本机 `data/known_hosts.json`，之后主机密钥变化会被拦下并要求确认，防止中间人冒充服务器；
 - 会话用 `SameSite=Strict` 的 HttpOnly Cookie（挡浏览器里的其他网页伪造请求）；
 - **密码只在内存里**，不写配置文件；配置只存「怎么连」（地址/端口/用户名/私钥路径）；
 - 每次写盘前**自动备份**为 `authorized_keys.bak.YYYYMMDDHHMMSS`；
@@ -62,14 +67,16 @@ ssh-keywarden/
 │   ├── authorized.js      authorized_keys 解析/序列化（保留原格式，不重排）
 │   ├── localkeys.js       本地密钥库扫描（递归 + 私钥/公钥配对）
 │   ├── ssh.js             SSH 连接、命令执行、原子写、备份
+│   ├── knownhosts.js      主机指纹（known_hosts 式 TOFU）
 │   ├── sshconfig.js       从 ~/.ssh/config 导入主机
 │   └── store.js           配置持久化（不含密码）
 ├── public/                前端（原生 JS，无框架）
+│   ├── js/                页面逻辑（ES modules：core/hosts/keys/connect/terminal…）
 │   └── vendor/            xterm.js 及其样式（UMD，直接从 node_modules 复制，运行时无需构建）
 ├── tests/
 │   ├── run.js             单元测试（解析/生成/扫描）
 │   └── e2e.js             端到端（内置一个内存 SSH 服务端，跑完四条主流程）
-└── data/config.json       运行时生成的主机与设置
+└── data/config.json       运行时生成的主机与设置（主机指纹在同目录 known_hosts.json）
 ```
 
 ## 测试
@@ -96,3 +103,7 @@ npm test
 - 只处理 `authorized_keys` 里的普通公钥行；`Match` 之类的 sshd 配置不管。
 - 无法自动验证「新钥匙能否登录」时（例如粘贴的公钥在本地没有对应私钥），默认**不删旧钥匙**，需要手动勾选强制。
 - 不走跳板机 / ProxyJump。
+
+## 许可
+
+MIT，见 [LICENSE](LICENSE)。

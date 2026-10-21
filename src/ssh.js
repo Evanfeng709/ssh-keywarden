@@ -49,6 +49,7 @@ function connect(cfg) {
   return new Promise((resolve, reject) => {
     const client = new Client();
     let settled = false;
+    let hostKeyError = null;
     const timeout = setTimeout(() => {
       if (settled) return;
       settled = true;
@@ -66,7 +67,8 @@ function connect(cfg) {
         try {
           client.end();
         } catch {}
-        reject(new Error(friendlyError(err, cfg)));
+        if (hostKeyError) reject(hostKeyError);
+        else reject(new Error(friendlyError(err, cfg)));
       } else {
         resolve(client);
       }
@@ -80,18 +82,31 @@ function connect(cfg) {
       done(prompts.map(() => cfg.password || ''));
     });
 
+    const options = {
+      host: cfg.host,
+      port: cfg.port || 22,
+      username: cfg.username,
+      privateKey: cfg.privateKey || undefined,
+      passphrase: cfg.passphrase || undefined,
+      password: cfg.password || undefined,
+      readyTimeout: CONNECT_TIMEOUT,
+      tryKeyboard: Boolean(cfg.password),
+      keepaliveInterval: 15000,
+    };
+
+    if (cfg.hostVerifier) {
+      options.hostVerifier = (key) => {
+        try {
+          return cfg.hostVerifier(key) !== false;
+        } catch (e) {
+          hostKeyError = e;
+          return false;
+        }
+      };
+    }
+
     try {
-      client.connect({
-        host: cfg.host,
-        port: cfg.port || 22,
-        username: cfg.username,
-        privateKey: cfg.privateKey || undefined,
-        passphrase: cfg.passphrase || undefined,
-        password: cfg.password || undefined,
-        readyTimeout: CONNECT_TIMEOUT,
-        tryKeyboard: Boolean(cfg.password),
-        keepaliveInterval: 15000,
-      });
+      client.connect(options);
     } catch (e) {
       finish(e);
     }
@@ -151,10 +166,10 @@ async function readRemoteText(client, remotePath) {
   assertSafePath(remotePath);
   const res = await exec(
     client,
-    `if [ -f ${q(remotePath)} ]; then base64 < ${q(remotePath)}; else echo __KK_MISSING__; fi`
+    `if [ -f ${q(remotePath)} ]; then base64 < ${q(remotePath)}; else echo __KW_MISSING__; fi`
   );
   const out = res.stdout.replace(/\s+/g, '');
-  if (out === '__KK_MISSING__') return null;
+  if (out === '__KW_MISSING__') return null;
   if (res.code !== 0) {
     throw new Error(`读取 ${remotePath} 失败：${res.stderr.trim() || `退出码 ${res.code}`}`);
   }

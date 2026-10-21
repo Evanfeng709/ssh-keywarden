@@ -856,6 +856,14 @@ input[type="checkbox"]:checked::after {
   margin-bottom: 13px;
 }
 
+.hostfp {
+  font-family: var(--mono);
+  font-size: 12.5px;
+  color: #cfdae6;
+  word-break: break-all;
+  user-select: all;
+}
+
 .toast-root {
   position: fixed;
   right: 18px;
