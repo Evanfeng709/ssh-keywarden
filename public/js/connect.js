@@ -131,15 +131,12 @@ function openCredModal(errMsg, hostId) {
         const password = m.querySelector('#c_pwd').value;
         const identityFile = m.querySelector('#c_key').value.trim();
         closeModal(m);
-        await doConnect(null, {
-          host: host.host,
-          port: host.port,
-          username: host.username,
-          identityFile: identityFile || undefined,
-          remotePath: host.remotePath || undefined,
+        // 必须带 host.id 重连：保留主机绑定后，新增密钥时的「切换本机登录密钥」才能写进配置。
+        // identityFile 始终提交（空串 = 这次改用密码登录）。
+        await doConnect(host.id, {
+          identityFile,
           passphrase: passphrase || undefined,
           password: password || undefined,
-          name: host.name,
         });
       });
     },

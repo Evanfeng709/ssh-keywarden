@@ -352,7 +352,12 @@ async function openSession(body) {
   if (body.hostId) {
     const h = store.listHosts().find((x) => x.id === body.hostId);
     if (!h) throw new Error('主机配置不存在，请刷新页面');
-    target = { ...h, passphrase: body.passphrase, password: body.password };
+    // 凭据弹窗是在已保存主机的基础上重连：必须保留 id，否则会话变成「临时连接」，
+    // 之后新增密钥勾了「切换本机登录密钥」也写不进主机配置。
+    // identityFile 显式传空串表示这次不用私钥（改走密码），undefined 才表示沿用主机配置。
+    const identityFile =
+      body.identityFile === undefined ? h.identityFile : String(body.identityFile).trim();
+    target = { ...h, identityFile, passphrase: body.passphrase, password: body.password };
   } else {
     target = {
       name: body.name || body.host,
@@ -457,6 +462,7 @@ function sessionPayload(session, rawText) {
   return {
     sid: session.sid,
     host: {
+      id: session.target.id || '',
       name: session.target.name || session.target.host,
       host: session.target.host,
       port: session.target.port || 22,

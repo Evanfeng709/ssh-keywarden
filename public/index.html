@@ -80,15 +80,32 @@
   </section>
 
   <aside class="panel local-panel">
-    <div class="panel-head">
-      <div class="head-left">
+    <div class="local-head">
+      <div class="local-title-row">
         <h2>本地密钥库</h2>
-        <div class="meta" id="localDir">—</div>
-      </div>
-      <div class="head-right">
+        <span id="localCount" class="local-count">0</span>
         <button id="btnRescan" class="icon-btn" title="重新扫描">⟳</button>
       </div>
+      <button id="localDirBtn" class="local-dir" title="未设置密钥目录" disabled>
+        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
+        <span id="localDir" class="local-dir-text">—</span>
+        <svg class="local-dir-copy" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+      </button>
     </div>
+
+    <div id="localTools" class="local-tools hidden">
+      <div class="local-search">
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.2-3.2"/></svg>
+        <input id="localSearch" type="text" placeholder="搜索名称 / 指纹 / 目录" autocomplete="off" spellcheck="false" />
+        <button id="localSearchClear" class="local-search-clear hidden" title="清空搜索">×</button>
+      </div>
+      <div id="localFilter" class="local-filter" role="group" aria-label="按密钥类型筛选">
+        <button data-kind="all" class="on">全部 <b>0</b></button>
+        <button data-kind="private">私钥 <b>0</b></button>
+        <button data-kind="public">公钥 <b>0</b></button>
+      </div>
+    </div>
+
     <ul id="localList" class="local-list"></ul>
     <div class="local-errors" id="localErrors"></div>
   </aside>

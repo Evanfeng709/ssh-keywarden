@@ -38,7 +38,6 @@ function openAddModal() {
           const data = await api('/api/add', { method: 'POST', body: { sid: state.session.sid, ...body } });
           (data.steps || []).forEach((s) => logLine(s, 'step'));
           state.session = data.session;
-          renderServer();
           if (data.changed) {
             logLine(`新增成功：${data.fingerprint}`, 'ok');
             toast('密钥已写入服务器', 'ok');
@@ -48,6 +47,7 @@ function openAddModal() {
             toast(data.message, 'warn', 5000);
           }
           await applySwitchResult(data, body.switchToNew);
+          renderServer();
           closeModal(m);
           await rescanLocal();
         } catch (e) {
@@ -146,11 +146,13 @@ function openReplaceModal(oldFp) {
               logLine('更换完成（强制模式）', 'ok');
               toast('更换完成', 'ok');
               await applySwitchResult(retry, true);
+              renderServer();
             }
           } else if (data.removedOld) {
             logLine('更换完成：新钥匙已生效，旧钥匙已移除', 'ok');
             toast('更换完成', 'ok');
             await applySwitchResult(data, true);
+            renderServer();
           } else {
             logLine(data.message || '未做改动', 'warn');
             toast(data.message || '未做改动', 'warn', 5000);

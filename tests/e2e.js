@@ -360,6 +360,14 @@ async function main() {
   });
   const oldBundle = await request('GET', '/app.js');
   test('旧的单文件 app.js 不再对外提供', () => assert.strictEqual(oldBundle.status, 404));
+  const indexHtml = await request('GET', '/');
+  const keysJs = await request('GET', '/js/keys.js');
+  test('本地密钥库工具条与模块已就位', () => {
+    assert.ok(indexHtml.raw.includes('id="localSearch"'));
+    assert.ok(indexHtml.raw.includes('id="localFilter"'));
+    assert.strictEqual(keysJs.status, 200);
+    assert.ok(keysJs.raw.includes('bindLocalTools'));
+  });
 
   console.log('\n[主机指纹 TOFU]');
   const firstTry = await request('POST', '/api/connect', {
@@ -648,6 +656,94 @@ async function main() {
   });
 
   await request('DELETE', `/api/hosts?id=${encodeURIComponent(hostEnc.id)}`, null);
+
+  console.log('\n[凭据弹窗重连后切换登录密钥]');
+
+  // 回归：私钥带 passphrase 时，连接会先失败、再由凭据弹窗重连。
+  // 旧版前端重连时丢掉了 hostId，会话变成「临时连接」，新增密钥勾了切换也写不进主机配置。
+  const hostCred = await call('/api/hosts', {
+    name: 'mock-cred-bind',
+    host: '127.0.0.1',
+    port: mockPort,
+    username: 'tester',
+    identityFile: ENC_KEY_PATH,
+  });
+
+  const credConn = await call('/api/connect', {
+    hostId: hostCred.id,
+    identityFile: ENC_KEY_PATH,
+    passphrase: 'test-pass-123',
+  });
+
+  test('凭据弹窗重连保留主机绑定，并带上弹窗里编辑的私钥路径', () => {
+    assert.strictEqual(credConn.authMethod, 'key');
+    assert.strictEqual(credConn.usedKeyFp, ENC_FP);
+  });
+
+  const hostOverride = await call('/api/hosts', {
+    name: 'mock-cred-override',
+    host: '127.0.0.1',
+    port: mockPort,
+    username: 'tester',
+    identityFile: keyAPath,
+  });
+
+  const overrideConn = await call('/api/connect', {
+    hostId: hostOverride.id,
+    identityFile: ENC_KEY_PATH,
+    passphrase: 'test-pass-123',
+  });
+  const savedOverride = JSON.parse((await request('GET', '/api/state', null)).raw).data.hosts.find(
+    (h) => h.id === hostOverride.id
+  );
+
+  test('带 hostId 的 identityFile 只覆盖本次连接，不改动主机配置', () => {
+    assert.strictEqual(overrideConn.usedKeyFp, ENC_FP);
+    assert.strictEqual(savedOverride.identityFile, keyAPath);
+  });
+
+  const pwdConn = await call('/api/connect', {
+    hostId: hostOverride.id,
+    identityFile: '',
+    password: MOCK_PASSWORD,
+  });
+
+  test('显式传空 identityFile → 改走密码，不被主机配置里的私钥覆盖', () => {
+    assert.strictEqual(pwdConn.authMethod, 'password');
+    assert.strictEqual(pwdConn.usedKeyFp, '');
+  });
+
+  const credAdd = await call('/api/add', {
+    sid: credConn.sid,
+    mode: 'generate',
+    generator: 'ed25519',
+    comment: 'cred-switch',
+    saveDir: KEYS_DIR,
+    passphrase: 'newpass456',
+    switchToNew: true,
+  });
+
+  test('凭据重连后新增加密密钥，切换登录密钥会落盘', () => {
+    assert.strictEqual(credAdd.switched, true, `未切换：${(credAdd.steps || []).join(' | ')}`);
+    assert.ok(credAdd.identityFile && credAdd.identityFile !== ENC_KEY_PATH);
+  });
+
+  const savedCred = JSON.parse((await request('GET', '/api/state', null)).raw).data.hosts.find(
+    (h) => h.id === hostCred.id
+  );
+
+  test('落盘配置指向新生成的加密私钥', () => {
+    assert.strictEqual(savedCred.identityFile, credAdd.identityFile);
+  });
+
+  const credRe = await call('/api/connect', { hostId: hostCred.id, passphrase: 'newpass456' });
+  test('下次连接无需再指定 identityFile，用的就是新密钥', () => {
+    assert.strictEqual(credRe.usedKeyFp, credAdd.fingerprint);
+  });
+
+  await call('/api/delete', { sid: credRe.sid, fingerprints: [credAdd.fingerprint], force: true });
+  await request('DELETE', `/api/hosts?id=${encodeURIComponent(hostCred.id)}`, null);
+  await request('DELETE', `/api/hosts?id=${encodeURIComponent(hostOverride.id)}`, null);
 
   console.log('\n[更换]');
 

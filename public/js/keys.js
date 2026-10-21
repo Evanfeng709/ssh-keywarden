@@ -7,6 +7,12 @@ import { sshdBadgeHtml } from './sshd.js';
 /* 本地密钥库                                                          */
 /* ------------------------------------------------------------------ */
 
+const LOCAL_KIND_LABEL = { private: '私钥', public: '公钥' };
+let localKind = 'all';
+let localQuery = '';
+let localVisible = [];
+let localToolsBound = false;
+
 async function rescanLocal() {
   try {
     const data = await api(`/api/local-keys?dir=${encodeURIComponent(state.settings.localKeyDir || '')}`);
@@ -18,54 +24,220 @@ async function rescanLocal() {
   }
 }
 
-function renderLocal() {
-  const { dir, entries, errors } = state.localKeys;
-  $('localDir').textContent = dir || '未设置密钥目录';
-  $('localDir').title = dir || '';
+function bindLocalTools() {
+  if (localToolsBound) return;
+  localToolsBound = true;
 
-  const list = $('localList');
-  list.innerHTML = '';
-
-  const sorted = [...entries].sort((a, b) => {
-    if (a.kind !== b.kind) return a.kind === 'private' ? -1 : 1;
-    return (b.mtime || 0) - (a.mtime || 0);
+  const search = $('localSearch');
+  search.addEventListener('input', () => {
+    localQuery = search.value;
+    renderLocal();
+  });
+  search.addEventListener('keydown', (e) => {
+    if (e.key !== 'Escape') return;
+    localQuery = '';
+    search.value = '';
+    renderLocal();
+    search.blur();
+  });
+  $('localSearchClear').addEventListener('click', () => {
+    localQuery = '';
+    search.value = '';
+    renderLocal();
+    search.focus();
   });
 
-  if (!sorted.length) {
-    list.innerHTML = `<div class="key-pick"><div class="none">${
-      dir ? '这个目录里没找到密钥文件' : '请先在设置里指定本地密钥目录'
-    }</div></div>`;
-  }
+  $('localFilter').addEventListener('click', (e) => {
+    const btn = e.target.closest('button[data-kind]');
+    if (!btn) return;
+    localKind = btn.dataset.kind;
+    renderLocal();
+  });
 
-  for (const e of sorted) {
-    const li = document.createElement('li');
-    li.title = '点击复制路径';
-    const tags = [];
-    if (e.kind === 'private') tags.push(e.encrypted ? '<span class="tag">已加密</span>' : '<span class="tag on">私钥</span>');
-    else tags.push('<span class="tag">公钥</span>');
+  $('localDirBtn').addEventListener('click', () => {
+    const dir = state.localKeys.dir;
+    if (dir) copyLocalText(dir, '目录');
+  });
 
-    li.innerHTML = `
-      <div class="lname">
-        <span>${escapeHtml(e.name)}</span>
-        <span>${tags.join(' ')}</span>
-      </div>
-      <div class="lfp">${escapeHtml(shortFp(e.fingerprint))}</div>
-      <div class="lpath">${escapeHtml(e.dir)}</div>`;
-    li.addEventListener('click', async () => {
-      try {
-        await navigator.clipboard.writeText(e.path);
-        toast('路径已复制', 'ok', 1800);
-      } catch {
-        toast(e.path, 'info', 5000);
-      }
-    });
-    list.appendChild(li);
+  const list = $('localList');
+  list.addEventListener('click', (e) => {
+    if (e.target.closest('[data-local-reset]')) {
+      localQuery = '';
+      localKind = 'all';
+      $('localSearch').value = '';
+      renderLocal();
+      $('localSearch').focus();
+      return;
+    }
+    const item = e.target.closest('.local-item');
+    if (!item) return;
+    const entry = localVisible[Number(item.dataset.idx)];
+    if (!entry) return;
+    if (e.target.closest('.local-fp')) {
+      if (entry.fingerprint) copyLocalText(entry.fingerprint, '指纹');
+      else toast('这把钥匙没有可用指纹', 'warn', 2200);
+      return;
+    }
+    copyLocalText(entry.path, '路径');
+  });
+
+  list.addEventListener('keydown', (e) => {
+    if (e.key !== 'Enter' && e.key !== ' ') return;
+    const item = e.target.closest('.local-item');
+    if (!item) return;
+    e.preventDefault();
+    const entry = localVisible[Number(item.dataset.idx)];
+    if (entry) copyLocalText(entry.path, '路径');
+  });
+}
+
+/** 目录只保留头尾，中间省略；完整值放 title / 点击复制 */
+function midPath(text, max = 40) {
+  if (!text || text.length <= max) return text || '';
+  const head = Math.ceil((max - 1) * 0.58);
+  const tail = max - 1 - head;
+  return `${text.slice(0, head)}…${text.slice(-tail)}`;
+}
+
+function leafOf(dir) {
+  const parts = String(dir || '').split(/[\\/]/).filter(Boolean);
+  return parts.length ? parts[parts.length - 1] : String(dir || '');
+}
+
+async function copyLocalText(text, label) {
+  try {
+    await navigator.clipboard.writeText(text);
+    toast(`${label}已复制`, 'ok', 1600);
+  } catch {
+    toast(text, 'info', 5000);
   }
+}
+
+function localRow(entry) {
+  const idx = localVisible.push(entry) - 1;
+  const li = document.createElement('li');
+  li.className = 'local-item';
+  li.dataset.idx = String(idx);
+  li.tabIndex = 0;
+  li.title = `点击复制完整路径\n${entry.path}`;
+
+  const line1 = document.createElement('div');
+  line1.className = 'local-line1';
+  const name = document.createElement('span');
+  name.className = 'local-name';
+  name.textContent = entry.name;
+  name.title = entry.name;
+  const badges = document.createElement('span');
+  badges.className = 'local-badges';
+  if (entry.kind === 'private' && entry.encrypted) {
+    const badge = document.createElement('span');
+    badge.className = 'local-badge';
+    badge.title = '私钥已加密，连接时需要 passphrase';
+    badge.innerHTML = '<svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" aria-hidden="true"><rect x="4" y="10" width="16" height="11" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/></svg>加密';
+    badges.appendChild(badge);
+  }
+  line1.append(name, badges);
+
+  const line2 = document.createElement('div');
+  line2.className = 'local-line2';
+  const fp = document.createElement('span');
+  fp.className = `local-fp${entry.fingerprint ? '' : ' nofp'}`;
+  fp.textContent = entry.fingerprint ? shortFp(entry.fingerprint) : '指纹未知';
+  fp.title = entry.fingerprint
+    ? `${entry.fingerprint}（点击复制完整指纹）`
+    : '没有同名 .pub 公钥，无法计算指纹';
+  const dirLeaf = document.createElement('span');
+  dirLeaf.className = 'local-dir-leaf';
+  dirLeaf.textContent = leafOf(entry.dir);
+  dirLeaf.title = entry.dir;
+  line2.append(fp, dirLeaf);
+
+  li.append(line1, line2);
+  return li;
+}
+
+function renderLocal() {
+  const { dir, entries, errors } = state.localKeys;
+  const list = $('localList');
+  list.innerHTML = '';
+  localVisible = [];
+
+  $('localCount').textContent = String(entries.length);
+
+  const dirBtn = $('localDirBtn');
+  const dirText = $('localDir');
+  dirText.textContent = dir ? midPath(dir) : '未设置密钥目录';
+  dirText.title = dir || '';
+  dirBtn.disabled = !dir;
+  dirBtn.title = dir ? `点击复制密钥目录\n${dir}` : '未设置密钥目录';
+
+  const priv = entries.filter((e) => e.kind === 'private').length;
+  const counts = { all: entries.length, private: priv, public: entries.length - priv };
+  for (const btn of $('localFilter').querySelectorAll('button[data-kind]')) {
+    btn.classList.toggle('on', btn.dataset.kind === localKind);
+    btn.querySelector('b').textContent = String(counts[btn.dataset.kind] || 0);
+  }
+  $('localTools').classList.toggle('hidden', entries.length === 0);
+  $('localSearchClear').classList.toggle('hidden', !localQuery);
 
   const errBox = $('localErrors');
-  errBox.innerHTML = errors && errors.length
-    ? errors.slice(0, 4).map((x) => `⚠ ${escapeHtml(x.path || '')}：${escapeHtml(x.message)}`).join('<br>')
-    : '';
+  if (errors && errors.length) {
+    errBox.textContent = `⚠ ${errors.length} 个文件读取失败`;
+    errBox.title = errors.map((x) => `${x.path || ''}：${x.message}`).join('\n');
+  } else {
+    errBox.textContent = '';
+    errBox.removeAttribute('title');
+  }
+
+  const query = localQuery.trim().toLowerCase();
+  const filtered = entries.filter((e) => {
+    if (localKind !== 'all' && e.kind !== localKind) return false;
+    if (!query) return true;
+    return [e.name, e.fingerprint, e.path, e.dir, e.type, e.comment]
+      .filter(Boolean)
+      .join(' ')
+      .toLowerCase()
+      .includes(query);
+  });
+
+  if (!filtered.length) {
+    const li = document.createElement('li');
+    li.className = 'local-empty';
+    const title = document.createElement('div');
+    title.className = 'etitle';
+    const hint = document.createElement('div');
+    hint.className = 'ehint';
+    if (!entries.length) {
+      title.textContent = dir ? '这个目录里没找到密钥文件' : '请先在设置里指定本地密钥目录';
+      hint.textContent = dir ? '支持递归扫描私钥与 .pub 公钥' : '点右上角 📁 选择目录后会重新扫描';
+      li.append(title, hint);
+    } else {
+      title.textContent = '没有匹配的密钥';
+      hint.textContent = '换个关键词，或清空筛选';
+      const reset = document.createElement('button');
+      reset.type = 'button';
+      reset.dataset.localReset = '';
+      reset.textContent = '清空筛选';
+      li.append(title, hint, reset);
+    }
+    list.appendChild(li);
+    return;
+  }
+
+  const sorted = [...filtered].sort((a, b) => (b.mtime || 0) - (a.mtime || 0));
+  for (const kind of ['private', 'public']) {
+    const group = sorted.filter((e) => e.kind === kind);
+    if (!group.length) continue;
+    const head = document.createElement('li');
+    head.className = 'local-group';
+    const label = document.createElement('span');
+    label.textContent = LOCAL_KIND_LABEL[kind];
+    const n = document.createElement('span');
+    n.textContent = String(group.length);
+    head.append(label, n);
+    list.appendChild(head);
+    for (const entry of group) list.appendChild(localRow(entry));
+  }
 }
 
 /** 找出某指纹对应的本地文件（优先公钥条目） */
@@ -74,6 +246,13 @@ function localMatch(fingerprint) {
   const hits = state.localKeys.entries.filter((e) => e.fingerprint === fingerprint);
   if (!hits.length) return null;
   return hits.find((e) => e.kind === 'public') || hits[0];
+}
+
+/** 本地条目是否就是主机配置里指定的登录私钥 */
+function isLoginKey(entry, identityFile) {
+  if (!entry || !identityFile) return false;
+  const norm = (p) => String(p).replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
+  return norm(entry.path.replace(/\.pub$/i, '')) === norm(identityFile);
 }
 
 /* ------------------------------------------------------------------ */
@@ -180,6 +359,13 @@ function renderServer() {
   setConnected(true);
 
   const usedFp = s.usedKeyFp;
+  // 徽章代表「主机配置里的登录私钥」，也就是下次连接会用的那把；
+  // 凭据弹窗临时换私钥只影响本次会话，不能拿 s.host.identityFile 冒充配置。
+  const savedHost = s.host.id ? state.hosts.find((h) => h.id === s.host.id) : null;
+  const identityFile = (savedHost ? savedHost.identityFile : s.host.identityFile) || '';
+  const loginTitle = savedHost
+    ? '主机配置里的登录私钥，下次连接会用它'
+    : '本次连接使用的私钥（临时连接，未写入主机配置）';
   renderServerMeta(s);
 
   renderNotice(
@@ -221,6 +407,7 @@ function renderServer() {
     const checked = state.selected.has(item.fingerprint);
     const local = localMatch(item.fingerprint);
     const isUsed = usedFp && item.fingerprint === usedFp;
+    const isLogin = isLoginKey(local, identityFile);
     const statusBits = [];
     if (isUsed) statusBits.push('<span class="used-dot" title="本次连接所用的钥匙"></span>');
     if (item.duplicateOf != null) statusBits.push('<span class="badge dup">重复</span>');
@@ -239,7 +426,9 @@ function renderServer() {
         ${item.options ? `<span class="options">选项：${escapeHtml(item.options)}</span>` : ''}
       </td>
       <td class="local-cell ${local ? 'hit' : ''}">
-        ${local ? escapeHtml(local.name) : '—'}
+        ${local ? escapeHtml(local.name) : '—'}${
+          isLogin ? `<span class="badge login" title="${loginTitle}">登录</span>` : ''
+        }
       </td>
       <td class="col-op">
         <button class="row-btn" data-replace="${escapeHtml(item.fingerprint)}" title="用新密钥替换这一把">更换</button>
@@ -295,4 +484,4 @@ function updateSelectionUi() {
   ca.indeterminate = checked.length > 0 && checked.length < all.length;
 }
 
-export { rescanLocal, renderLocal, localMatch, setConnected, alignSplitter, renderServer, renderNotice, updateSelectionUi };
+export { rescanLocal, bindLocalTools, renderLocal, localMatch, setConnected, alignSplitter, renderServer, renderNotice, updateSelectionUi };

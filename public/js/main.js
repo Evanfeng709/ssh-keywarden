@@ -2,7 +2,7 @@
 
 import { $, state, toast, logLine, api, setSessionLostHandler } from './core.js';
 import { openHostModal, openSettingsModal, renderHosts } from './hosts.js';
-import { renderLocal, renderServer, alignSplitter, rescanLocal } from './keys.js';
+import { renderLocal, renderServer, alignSplitter, rescanLocal, bindLocalTools } from './keys.js';
 import { doConnect, refreshSession, disconnect, handleSessionLost } from './connect.js';
 import { openAddModal, askDelete } from './actions.js';
 import { toggleSshdFromBadge } from './sshd.js';
@@ -34,6 +34,7 @@ function bind() {
 
   $('btnSettings').addEventListener('click', openSettingsModal);
   $('btnRescan').addEventListener('click', rescanLocal);
+  bindLocalTools();
 
   $('btnRefresh').addEventListener('click', refreshSession);
   $('btnDisconnect').addEventListener('click', disconnect);
