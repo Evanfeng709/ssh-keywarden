@@ -3,6 +3,32 @@
 > 版本号规则：`v<日期>.<当天第几次更新>`，例如 `v2026.10.19.4` 表示 2026-10-19 当天第 4 次更新。
 > 单一来源是 `src/version.js`；`package.json` 的 `version` 因 semver 限制写成 `2026.10.19-4`（分隔符不同，指同一个版本）。
 
+## v2026.10.21.2 — 2026-10-21
+
+### 安全
+- **新增 SSH 主机指纹校验（TOFU）**：首次连接会先返回服务器主机密钥类型与 `SHA256` 指纹，用户确认后才写入本机 `data/known_hosts.json`（权限 0600）。同一 `host:port` 的指纹变化会返回 `HOSTKEY_CHANGED`，弹窗同时展示新旧指纹，未确认不连接 —— 防止中间人冒充服务器。
+  - 新增 `src/knownhosts.js`：指纹算法与 `ssh-keygen -lf` 一致；主机名大小写归一，缺省端口按 22。
+  - 密码兜底重试、「更换钥匙」前的验证登录复用同一校验。
+  - 前端连接失败若带 `HOSTKEY_*` 代码，弹出指纹确认框（不再是 passphrase 输入框）；确认后带 `trustFingerprint` 重连并落盘。
+- 会话令牌比较改用 `crypto.timingSafeEqual`（长度不同直接拒绝），避免逐字节比较泄露时序。
+
+### 工程
+- 补 **MIT LICENSE**、**GitHub Actions CI**（Node 20 / 22 跑 `npm test`）、`.gitattributes`（`.cmd` 固定 CRLF）。
+- `package-lock.json` 的下载地址全部切回官方 npm registry（原先残留 npmmirror），`npm ci` 可直接使用；README 补充国内镜像安装方式。
+- 内部常量前缀由 `KK_` 统一为 `KW_`，数据目录环境变量改为 `KW_DATA_DIR`；`data/config.json` 结构不变，已有配置无需迁移。
+- README 增加 CI 徽标、主机指纹说明、`knownhosts.js` 目录项与许可见。
+
+### 维护
+- **前端按职责拆成 ES modules**（`public/js/core|files|hosts|keys|connect|keyform|sshd|actions|terminal|main.js`），不再维护 1900 行的单文件 `public/app.js`；仍无构建步骤，浏览器直接加载。
+  - 静态资源白名单同步收紧：只放行 `/js/*.js`、`/vendor/*` 与 `index.html`、`style.css`，其他路径 404。
+  - 模块间只通过显式 `import` 交互；会话断开的界面复位改由 `main.js` 注册回调，避免 core 反向依赖业务模块。
+
+### 测试
+- 单元 37 通过、端到端 40 通过，0 失败。
+- 新增单元用例：指纹格式、首次未确认时拒绝、确认后落盘、密钥变化、大小写/默认端口归一；版本号三处一致性、CHANGELOG 条目、锁文件 registry 检查。
+- 端到端新增「首次连接返回 409 + `HOSTKEY_UNKNOWN` 与指纹详情」；mock server 接住指纹拒绝导致的 KEX 中断 error，测试输出不再出现未捕获异常。
+- 端到端新增静态资源用例：模块入口/子模块可访问且 MIME 正确，旧 `/app.js` 返回 404。
+
 ## v2026.10.21.1 — 2026-10-21
 
 ### 更名
