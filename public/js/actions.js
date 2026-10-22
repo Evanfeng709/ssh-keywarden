@@ -76,12 +76,14 @@ function openReplaceModal(oldFp) {
   const form = keySourceForm('rep', { showSwitch: false });
 
   const oldOptions = keys
-    .map(
-      (k) =>
-        `<option value="${escapeHtml(k.fingerprint)}" ${k.fingerprint === oldFp ? 'selected' : ''}>${escapeHtml(
-          shortFp(k.fingerprint)
-        )} · ${escapeHtml(k.type)} · ${escapeHtml(k.comment || '无注释')}</option>`
-    )
+    .map((k) => {
+      const note = state.keyNotes && state.keyNotes[k.fingerprint] ? state.keyNotes[k.fingerprint].note : '';
+      return `<option value="${escapeHtml(k.fingerprint)}" ${k.fingerprint === oldFp ? 'selected' : ''}>${escapeHtml(
+        shortFp(k.fingerprint)
+      )} · ${escapeHtml(k.type)} · ${escapeHtml(k.comment || '无注释')}${
+        note ? ` · ${escapeHtml(note)}` : ''
+      }</option>`;
+    })
     .join('');
 
   const bodyHtml = `
@@ -182,7 +184,8 @@ async function askDelete(fingerprints) {
   const info = list
     .map((fp) => {
       const item = state.session.items.find((i) => i.fingerprint === fp);
-      return `· ${item ? item.comment || '(无注释)' : ''}  ${shortFp(fp)}`;
+      const note = state.keyNotes && state.keyNotes[fp] ? state.keyNotes[fp].note : '';
+      return `· ${item ? item.comment || '(无注释)' : ''}${note ? `（备注：${note}）` : ''}  ${shortFp(fp)}`;
     })
     .join('\n');
 
@@ -197,7 +200,7 @@ async function askDelete(fingerprints) {
     });
     (data.steps || []).forEach((s) => logLine(s, 'step'));
     state.session = data.session;
-    state.selected.clear();
+    if (data.changed) state.selected.clear();
     renderServer();
     if (data.needsForce) {
       logLine(data.message, 'warn');

@@ -280,4 +280,5 @@ module.exports = {
   friendlyError,
   isDisconnectError,
   assertSafePath,
+  quote: q,
 };

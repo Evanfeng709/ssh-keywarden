@@ -9,6 +9,7 @@ export const $ = (id) => document.getElementById(id);
 export const state = {
   hosts: [],
   settings: {},
+  keyNotes: {},
   localKeys: { dir: '', entries: [], errors: [] },
   session: null,
   selected: new Set(),

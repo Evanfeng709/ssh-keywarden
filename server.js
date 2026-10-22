@@ -23,6 +23,7 @@ const { parseAuthorizedKeys, keyItems, renderWithout, appendKey } = require('./s
 const { scanKeys } = require('./src/localkeys');
 const knownhosts = require('./src/knownhosts');
 const ssh = require('./src/ssh');
+const backups = require('./src/backups');
 
 const PORT = Number(process.env.PORT) || 7791;
 const BIND = '127.0.0.1';
@@ -922,6 +923,65 @@ async function deleteKeys(session, body) {
   return { changed: true, steps, session: sessionPayload(session, fin || '') };
 }
 
+/**
+ * 从备份恢复 authorized_keys。
+ * 硬闸门：空备份一律拒绝；备份不含本次登录钥匙时必须 force；写入前 commitKeys 会再备份一次当前文件。
+ */
+async function restoreBackup(session, body) {
+  const name = String(body.name || '');
+  const backupPath = backups.backupPathFor(session.remotePath, name);
+  const parsedName = backups.parseBackupName(session.remotePath, name);
+
+  const currentRaw = await ssh.readRemoteText(session.client, session.remotePath);
+  const backupText = await ssh.readRemoteText(session.client, backupPath);
+  if (backupText === null) throw new Error('备份文件不存在，请刷新备份列表');
+
+  const diff = backups.diffBackup(currentRaw || '', backupText, session.usedKeyFp, currentRaw !== null);
+  if (diff.emptyBackup) {
+    throw new Error('这份备份里没有任何可用的密钥，恢复会清空 authorized_keys，已拒绝');
+  }
+  if (diff.usedKeyInBackup === false && !body.force) {
+    return {
+      changed: false,
+      needsForce: true,
+      message:
+        '这份备份不包含本次连接正在使用的钥匙。恢复后这个会话仍能操作，但下次连接会失败。确认要恢复请勾选强制。',
+      diff,
+      steps: [],
+      session: sessionPayload(session, currentRaw || ''),
+    };
+  }
+  if ((currentRaw || '') === backupText) {
+    return {
+      changed: false,
+      message: '这份备份与当前 authorized_keys 完全一致，无需恢复',
+      diff,
+      steps: [],
+      session: sessionPayload(session, currentRaw || ''),
+    };
+  }
+
+  const steps = [`准备从备份恢复：${parsedName.displayTime}（${name}）`];
+  await commitKeys(session, backupText, steps);
+
+  const fin = await ssh.readRemoteText(session.client, session.remotePath);
+  const expected = new Set(keyItems(parseAuthorizedKeys(backupText).items).map((i) => i.fingerprint));
+  const actual = new Set(keyItems(parseAuthorizedKeys(fin || '').items).map((i) => i.fingerprint));
+  if (expected.size !== actual.size || [...expected].some((fp) => !actual.has(fp))) {
+    throw new Error('恢复后回读的钥匙集合与备份不一致，请检查服务器');
+  }
+  steps.push(`恢复完成：${expected.size} 把钥匙`);
+  log(`已从备份恢复 authorized_keys：${name}（${session.target.username}@${session.target.host}）`);
+
+  return {
+    changed: true,
+    restored: true,
+    diff,
+    steps,
+    session: sessionPayload(session, fin || ''),
+  };
+}
+
 /* ------------------------------------------------------------------ */
 /* 内置终端（WebSocket ⇄ SSH shell）                                    */
 /* ------------------------------------------------------------------ */
@@ -1077,6 +1137,7 @@ async function handleApi(req, res, pathname, url) {
       version: APP_VERSION,
       hosts: store.listHosts(),
       settings,
+      keyNotes: store.listKeyNotes(),
       localKeys: { dir: settings.localKeyDir, entries: scan.entries, errors: scan.errors },
       sessions: [...sessions.values()].map((s) => ({
         sid: s.sid,
@@ -1178,6 +1239,11 @@ async function handleApi(req, res, pathname, url) {
     return ok(res, store.updateSettings(allowed));
   }
 
+  if (pathname === '/api/key-notes' && method === 'POST') {
+    const body = await readJson(req);
+    return ok(res, { keyNotes: store.setKeyNote(body.fingerprint, body.note) });
+  }
+
   if (pathname === '/api/connect' && method === 'POST') {
     const body = await readJson(req);
     const session = await openSession(body);
@@ -1190,6 +1256,32 @@ async function handleApi(req, res, pathname, url) {
     const raw = await ssh.readRemoteText(session.client, session.remotePath);
     session.fileExists = raw !== null;
     return ok(res, sessionPayload(session, raw || ''));
+  }
+
+  if (pathname === '/api/backups' && method === 'GET') {
+    const session = mustSession({ sid: url.searchParams.get('sid') });
+    const list = await backups.listBackups(session.client, session.remotePath);
+    return ok(res, { remotePath: session.remotePath, backups: list });
+  }
+
+  if (pathname === '/api/backups/diff' && method === 'GET') {
+    const session = mustSession({ sid: url.searchParams.get('sid') });
+    const name = url.searchParams.get('name') || '';
+    const backupPath = backups.backupPathFor(session.remotePath, name);
+    const parsedName = backups.parseBackupName(session.remotePath, name);
+    const currentRaw = await ssh.readRemoteText(session.client, session.remotePath);
+    const backupText = await ssh.readRemoteText(session.client, backupPath);
+    if (backupText === null) throw new Error('备份文件不存在，请刷新备份列表');
+    return ok(res, {
+      ...parsedName,
+      ...backups.diffBackup(currentRaw || '', backupText, session.usedKeyFp, currentRaw !== null),
+    });
+  }
+
+  if (pathname === '/api/backups/restore' && method === 'POST') {
+    const body = await readJson(req);
+    const session = mustSession(body);
+    return ok(res, await restoreBackup(session, body));
   }
 
   if (pathname === '/api/add' && method === 'POST') {

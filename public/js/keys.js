@@ -13,6 +13,11 @@ let localQuery = '';
 let localVisible = [];
 let localToolsBound = false;
 
+let keyFilter = 'all';
+let keyQuery = '';
+let keySid = '';
+let serverToolsBound = false;
+
 async function rescanLocal() {
   try {
     const data = await api(`/api/local-keys?dir=${encodeURIComponent(state.settings.localKeyDir || '')}`);
@@ -153,6 +158,14 @@ function localRow(entry) {
   line2.append(fp, dirLeaf);
 
   li.append(line1, line2);
+  const note = noteOf(entry.fingerprint);
+  if (note) {
+    const line3 = document.createElement('div');
+    line3.className = 'local-note';
+    line3.textContent = note;
+    line3.title = `本地备注：${note}`;
+    li.appendChild(line3);
+  }
   return li;
 }
 
@@ -193,7 +206,7 @@ function renderLocal() {
   const filtered = entries.filter((e) => {
     if (localKind !== 'all' && e.kind !== localKind) return false;
     if (!query) return true;
-    return [e.name, e.fingerprint, e.path, e.dir, e.type, e.comment]
+    return [e.name, e.fingerprint, e.path, e.dir, e.type, e.comment, noteOf(e.fingerprint)]
       .filter(Boolean)
       .join(' ')
       .toLowerCase()
@@ -248,6 +261,24 @@ function localMatch(fingerprint) {
   return hits.find((e) => e.kind === 'public') || hits[0];
 }
 
+/** 一次渲染只建一次映射，避免每行都全量扫本地密钥库 */
+function buildLocalMap() {
+  const map = new Map();
+  for (const entry of state.localKeys.entries) {
+    if (!entry.fingerprint) continue;
+    const prev = map.get(entry.fingerprint);
+    if (!prev || (prev.kind !== 'public' && entry.kind === 'public')) {
+      map.set(entry.fingerprint, entry);
+    }
+  }
+  return map;
+}
+
+function noteOf(fingerprint) {
+  const entry = fingerprint && state.keyNotes ? state.keyNotes[fingerprint] : null;
+  return entry && typeof entry.note === 'string' ? entry.note : '';
+}
+
 /** 本地条目是否就是主机配置里指定的登录私钥 */
 function isLoginKey(entry, identityFile) {
   if (!entry || !identityFile) return false;
@@ -263,6 +294,7 @@ function setConnected(connected) {
   const dot = $('connState');
   dot.className = `state-dot${connected ? ' on' : ''}`;
   $('btnRefresh').disabled = !connected;
+  $('btnBackups').disabled = !connected;
   $('btnAdd').disabled = !connected;
   $('btnDelete').disabled = !connected || state.selected.size === 0;
   $('btnDisconnect').disabled = !connected;
@@ -339,6 +371,145 @@ function renderServerMeta(s) {
   }
 }
 
+function bindServerTools() {
+  if (serverToolsBound) return;
+  serverToolsBound = true;
+
+  const search = $('keySearch');
+  search.addEventListener('input', () => {
+    keyQuery = search.value;
+    renderServer();
+  });
+  search.addEventListener('keydown', (e) => {
+    if (e.key !== 'Escape') return;
+    e.preventDefault();
+    if (keyQuery) {
+      keyQuery = '';
+      search.value = '';
+    } else if (keyFilter !== 'all') {
+      keyFilter = 'all';
+    }
+    renderServer();
+    search.blur();
+  });
+  $('keySearchClear').addEventListener('click', () => {
+    keyQuery = '';
+    search.value = '';
+    renderServer();
+    search.focus();
+  });
+
+  $('keyFilter').addEventListener('click', (e) => {
+    const btn = e.target.closest('button[data-filter]');
+    if (!btn) return;
+    keyFilter = btn.dataset.filter;
+    renderServer();
+  });
+
+  $('keyBody').addEventListener('click', (e) => {
+    if (e.target.closest('[data-filter-reset]')) {
+      resetKeyFilters();
+      return;
+    }
+    const editBtn = e.target.closest('[data-note-edit]');
+    if (!editBtn) return;
+    startNoteEdit(editBtn.closest('td'), editBtn.dataset.noteEdit);
+  });
+}
+
+function resetKeyFilters(focus = true) {
+  keyQuery = '';
+  keyFilter = 'all';
+  const search = $('keySearch');
+  if (search) search.value = '';
+  renderServer();
+  if (focus && search) search.focus();
+}
+
+function startNoteEdit(cell, fingerprint) {
+  if (!cell || cell.querySelector('.note-editor')) return;
+  const prevNote = noteOf(fingerprint);
+  const oldLine = cell.querySelector('.key-note');
+  if (oldLine) oldLine.classList.add('hidden');
+
+  const wrap = document.createElement('div');
+  wrap.className = 'note-editor';
+  const row = document.createElement('div');
+  row.className = 'note-editor-row';
+  const input = document.createElement('input');
+  input.type = 'text';
+  input.maxLength = 200;
+  input.value = prevNote;
+  input.placeholder = '例如：张三的 MacBook';
+  input.setAttribute('aria-label', '本地备注');
+  const save = document.createElement('button');
+  save.type = 'button';
+  save.className = 'note-save';
+  save.textContent = '保存';
+  const cancel = document.createElement('button');
+  cancel.type = 'button';
+  cancel.className = 'note-cancel';
+  cancel.textContent = '取消';
+  const hint = document.createElement('div');
+  hint.className = 'note-editor-hint';
+  hint.textContent = '只存本机；留空保存 = 删除备注';
+  row.append(input, save, cancel);
+  wrap.append(row, hint);
+  cell.appendChild(wrap);
+  input.focus();
+  input.select();
+
+  let closed = false;
+  const close = () => {
+    if (closed) return;
+    closed = true;
+    wrap.remove();
+    if (oldLine) oldLine.classList.remove('hidden');
+  };
+
+  const commit = async () => {
+    if (closed) return;
+    save.disabled = true;
+    cancel.disabled = true;
+    try {
+      const data = await api('/api/key-notes', {
+        method: 'POST',
+        body: { fingerprint, note: input.value },
+      });
+      state.keyNotes = data.keyNotes || {};
+      const wrapEl = document.querySelector('.table-wrap');
+      const top = wrapEl ? wrapEl.scrollTop : 0;
+      renderServer();
+      renderLocal();
+      if (wrapEl) wrapEl.scrollTop = top;
+      const next = noteOf(fingerprint);
+      toast(
+        next ? '备注已保存' : prevNote ? '备注已删除' : '没有需要保存的备注',
+        next || prevNote ? 'ok' : 'info',
+        1800
+      );
+    } catch (e) {
+      toast(`保存备注失败：${e.message}`, 'err', 5000);
+      save.disabled = false;
+      cancel.disabled = false;
+      input.focus();
+    }
+  };
+
+  save.addEventListener('click', commit);
+  cancel.addEventListener('click', close);
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      commit();
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      e.stopPropagation();
+      close();
+    }
+  });
+}
+
 function renderServer() {
   const s = state.session;
   const body = $('keyBody');
@@ -346,13 +517,23 @@ function renderServer() {
   body.innerHTML = '';
 
   if (!s) {
+    keySid = '';
     $('serverMeta').textContent = '未连接';
     setConnected(false);
     state.sshd = null;
+    $('keyTools').classList.add('hidden');
     empty.classList.remove('hidden');
     empty.querySelector('p').textContent = '还没有连接服务器';
     renderNotice('');
     return;
+  }
+
+  if (keySid !== s.sid) {
+    keySid = s.sid;
+    keyQuery = '';
+    keyFilter = 'all';
+    const search = $('keySearch');
+    if (search) search.value = '';
   }
 
   empty.classList.add('hidden');
@@ -375,12 +556,72 @@ function renderServer() {
   );
 
   const keys = s.items.filter((i) => i.kind === 'key');
+  const fpSet = new Set(keys.map((i) => i.fingerprint));
+  for (const fp of [...state.selected]) {
+    if (!fpSet.has(fp)) state.selected.delete(fp);
+  }
+
+  const localMap = buildLocalMap();
+  const query = keyQuery.trim().toLowerCase();
+  const active = Boolean(query) || keyFilter !== 'all';
+  const counts = {
+    all: keys.length,
+    unmatched: keys.filter((i) => !localMap.has(i.fingerprint)).length,
+    dup: keys.filter((i) => i.duplicateOf != null).length,
+    used: usedFp ? keys.filter((i) => i.fingerprint === usedFp).length : 0,
+  };
+
+  const tools = $('keyTools');
+  tools.classList.toggle('hidden', keys.length === 0);
+  let visibleKeys = keys;
+  if (keys.length) {
+    for (const btn of $('keyFilter').querySelectorAll('button[data-filter]')) {
+      btn.classList.toggle('on', btn.dataset.filter === keyFilter);
+      btn.querySelector('b').textContent = String(counts[btn.dataset.filter] || 0);
+    }
+    $('keySearchClear').classList.toggle('hidden', !keyQuery);
+
+    visibleKeys = keys.filter((item) => {
+      if (keyFilter === 'unmatched' && localMap.has(item.fingerprint)) return false;
+      if (keyFilter === 'dup' && item.duplicateOf == null) return false;
+      if (keyFilter === 'used' && !(usedFp && item.fingerprint === usedFp)) return false;
+      if (!query) return true;
+      const local = localMap.get(item.fingerprint);
+      return [item.comment, item.fingerprint, item.type, item.options, local?.name, local?.path, noteOf(item.fingerprint)]
+        .filter(Boolean)
+        .join(' ')
+        .toLowerCase()
+        .includes(query);
+    });
+
+    $('keyViewCount').textContent = `显示 ${visibleKeys.length} / 共 ${keys.length} 把`;
+    const visibleFps = new Set(visibleKeys.map((i) => i.fingerprint));
+    const hiddenSelected = [...state.selected].filter((fp) => !visibleFps.has(fp)).length;
+    const selHidden = $('keySelHidden');
+    selHidden.classList.toggle('hidden', hiddenSelected === 0);
+    selHidden.textContent = hiddenSelected
+      ? `已选 ${state.selected.size} · ${hiddenSelected} 条在筛选外`
+      : '';
+    selHidden.title = hiddenSelected
+      ? '删除会同时作用于被筛掉的钥匙，请核对删除确认里的清单'
+      : '';
+
+    if (!visibleKeys.length) {
+      body.innerHTML = `<tr><td colspan="7" class="filter-empty">没有匹配的密钥
+        <button type="button" data-filter-reset>清空筛选</button></td></tr>`;
+      updateSelectionUi();
+      alignSplitter();
+      return;
+    }
+  }
+
   if (!keys.length) {
     body.innerHTML = `<tr><td colspan="7" style="padding:26px;text-align:center;color:var(--text-faint)">
       服务器上还没有任何授权密钥。点「＋ 新增密钥」把本机的公钥装上去。</td></tr>`;
   }
 
-  for (const item of s.items) {
+  const items = active ? visibleKeys : s.items;
+  for (const item of items) {
     if (item.kind === 'comment') {
       const tr = document.createElement('tr');
       tr.className = 'comment-row';
@@ -404,10 +645,13 @@ function renderServer() {
       continue;
     }
 
+    if (item.kind !== 'key') continue;
+
     const checked = state.selected.has(item.fingerprint);
-    const local = localMatch(item.fingerprint);
+    const local = localMap.get(item.fingerprint) || null;
     const isUsed = usedFp && item.fingerprint === usedFp;
     const isLogin = isLoginKey(local, identityFile);
+    const note = noteOf(item.fingerprint);
     const statusBits = [];
     if (isUsed) statusBits.push('<span class="used-dot" title="本次连接所用的钥匙"></span>');
     if (item.duplicateOf != null) statusBits.push('<span class="badge dup">重复</span>');
@@ -422,8 +666,19 @@ function renderServer() {
       </td>
       <td class="status-cell">${sshdBadgeHtml()}${statusBits.join(' ') || (state.sshd && state.sshd.available ? '' : '<span class="dash">—</span>')}</td>
       <td class="comment-cell">
-        ${escapeHtml(item.comment || '(无注释)')}
+        <div class="comment-line">
+          <span class="comment-text">${escapeHtml(item.comment || '(无注释)')}</span>
+          <button type="button" class="note-btn ${note ? 'has' : ''}" data-note-edit="${escapeHtml(item.fingerprint)}"
+            title="${note ? '编辑本地备注' : '添加本地备注（仅保存在本机）'}"
+            aria-label="${note ? '编辑本地备注' : '添加本地备注'}">✎</button>
+        </div>
         ${item.options ? `<span class="options">选项：${escapeHtml(item.options)}</span>` : ''}
+        ${
+          note
+            ? `<button type="button" class="key-note" data-note-edit="${escapeHtml(item.fingerprint)}"
+                title="点击编辑本地备注：${escapeHtml(note)}"><span class="note-tag">备注</span>${escapeHtml(note)}</button>`
+            : ''
+        }
       </td>
       <td class="local-cell ${local ? 'hit' : ''}">
         ${local ? escapeHtml(local.name) : '—'}${
@@ -442,7 +697,7 @@ function renderServer() {
       updateSelectionUi();
     });
 
-    tr.querySelector('.fp').addEventListener('click', async (ev) => {
+    tr.querySelector('.fp').addEventListener('click', async () => {
       try {
         await navigator.clipboard.writeText(item.fingerprint);
         toast('指纹已复制', 'ok', 1600);
@@ -484,4 +739,15 @@ function updateSelectionUi() {
   ca.indeterminate = checked.length > 0 && checked.length < all.length;
 }
 
-export { rescanLocal, bindLocalTools, renderLocal, localMatch, setConnected, alignSplitter, renderServer, renderNotice, updateSelectionUi };
+export {
+  rescanLocal,
+  bindLocalTools,
+  bindServerTools,
+  renderLocal,
+  localMatch,
+  setConnected,
+  alignSplitter,
+  renderServer,
+  renderNotice,
+  updateSelectionUi,
+};

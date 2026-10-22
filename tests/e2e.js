@@ -106,6 +106,13 @@ function mockExec(cmd, stdin) {
   if (c === 'printf __LOGIN_OK__') return { out: '__LOGIN_OK__' };
   if (c.startsWith('chmod ')) return { out: '' };
 
+  // 备份列表：for f in '<authorized_keys>'.bak.*; do printf '%s\n' "$f"; done
+  if ((m = c.match(/^for f in '([^']+)'\.bak\.\*; do printf '%s\\n' "\$f"; done$/))) {
+    const prefix = `${m[1]}.bak.`;
+    const files = [...FS.keys()].filter((k) => k.startsWith(prefix)).sort();
+    return { out: files.map((f) => `${f}\n`).join('') };
+  }
+
   if ((m = c.match(/^mkdir -p '([^']+)'/))) {
     DIRS.add(m[1]);
     return { out: c.includes('echo __OK__') ? '__OK__' : '' };
@@ -362,11 +369,23 @@ async function main() {
   test('旧的单文件 app.js 不再对外提供', () => assert.strictEqual(oldBundle.status, 404));
   const indexHtml = await request('GET', '/');
   const keysJs = await request('GET', '/js/keys.js');
+  const backupsJs = await request('GET', '/js/backups.js');
   test('本地密钥库工具条与模块已就位', () => {
     assert.ok(indexHtml.raw.includes('id="localSearch"'));
     assert.ok(indexHtml.raw.includes('id="localFilter"'));
     assert.strictEqual(keysJs.status, 200);
     assert.ok(keysJs.raw.includes('bindLocalTools'));
+  });
+  test('服务器搜索/筛选、备注入口与备份弹窗已接线', () => {
+    assert.ok(indexHtml.raw.includes('id="keySearch"'));
+    assert.ok(indexHtml.raw.includes('id="keyFilter"'));
+    assert.ok(indexHtml.raw.includes('id="keyViewCount"'));
+    assert.ok(indexHtml.raw.includes('id="btnBackups"'));
+    assert.ok(keysJs.raw.includes('data-note-edit'), '备注入口应渲染在服务器表里');
+    assert.strictEqual(backupsJs.status, 200);
+    assert.ok(backupsJs.raw.includes('openBackupsModal'));
+    assert.ok(mainJs.raw.includes("from './backups.js'"));
+    assert.ok(mainJs.raw.includes("$('btnBackups')"));
   });
 
   console.log('\n[主机指纹 TOFU]');
@@ -818,6 +837,149 @@ async function main() {
     () => call('/api/delete', { sid: 'not-a-real-session', fingerprints: ['x'] }),
     /会话已失效/,
     '失效会话被拒绝'
+  );
+
+  console.log('\n[本地钥匙备注]');
+
+  const noteSaved = await call('/api/key-notes', {
+    fingerprint: keyA.fingerprint,
+    note: '  运维用的主钥匙\n备用  ',
+  });
+  test('备注保存后回传归一化文本', () => {
+    assert.strictEqual(noteSaved.keyNotes[keyA.fingerprint].note, '运维用的主钥匙 备用');
+  });
+
+  const stateNotes = JSON.parse((await request('GET', '/api/state', null)).raw).data.keyNotes;
+  test('/api/state 会带出本机备注', () => {
+    assert.strictEqual(stateNotes[keyA.fingerprint].note, '运维用的主钥匙 备用');
+  });
+
+  await assertRejects(
+    () => call('/api/key-notes', { fingerprint: 'not-a-fingerprint', note: 'x' }),
+    /指纹格式/,
+    '备注拒绝非法指纹'
+  );
+  await assertRejects(
+    () => call('/api/key-notes', { fingerprint: keyA.fingerprint, note: 'x'.repeat(201) }),
+    /最多 200/,
+    '备注超长被拒绝'
+  );
+
+  const noteCleared = await call('/api/key-notes', { fingerprint: keyA.fingerprint, note: '' });
+  test('空备注等于删除', () => {
+    assert.ok(!(keyA.fingerprint in noteCleared.keyNotes));
+    const onDisk = JSON.parse(fs.readFileSync(path.join(DATA_DIR, 'key-notes.json'), 'utf8'));
+    assert.ok(!(keyA.fingerprint in onDisk.notes));
+  });
+
+  console.log('\n[备份历史与恢复]');
+
+  const bkKeep = 'authorized_keys.bak.20260102000000';
+  const bkEmpty = 'authorized_keys.bak.20260101000000';
+  const bkOther = 'authorized_keys.bak.20260101000001';
+  FS.set(`${AUTH_PATH}.bak.20260102000000`, [keyA.publicKeyLine, keyC.publicKeyLine, '# 注释留在备份里'].join('\n') + '\n');
+  FS.set(`${AUTH_PATH}.bak.20260101000000`, '# 只有注释\n');
+  FS.set(`${AUTH_PATH}.bak.20260101000001`, `${keyC.publicKeyLine}\n`);
+
+  const listRes = JSON.parse((await request('GET', `/api/backups?sid=${encodeURIComponent(s1.sid)}`, null)).raw);
+  test('备份列表只列同目录合法备份，并按时间倒序', () => {
+    assert.strictEqual(listRes.ok, true, listRes.error);
+    assert.strictEqual(listRes.data.remotePath, AUTH_PATH);
+    const names = listRes.data.backups.map((b) => b.name);
+    assert.ok(names.includes(bkKeep));
+    assert.ok(names.includes(bkEmpty));
+    assert.ok(names.includes(bkOther));
+    assert.ok(!names.some((n) => n.includes('/')), '列表里不能出现完整路径');
+    const stamps = listRes.data.backups.map((b) => b.stamp);
+    assert.deepStrictEqual(stamps, [...stamps].sort().reverse(), '应按时间倒序');
+  });
+
+  const diffRes = JSON.parse(
+    (
+      await request(
+        'GET',
+        `/api/backups/diff?sid=${encodeURIComponent(s1.sid)}&name=${encodeURIComponent(bkKeep)}`,
+        null
+      )
+    ).raw
+  );
+  test('差异方向正确：备份比当前多出的钥匙标为恢复后新增', () => {
+    assert.strictEqual(diffRes.ok, true, diffRes.error);
+    const d = diffRes.data;
+    assert.strictEqual(d.usedKeyInBackup, true);
+    assert.strictEqual(d.backupKeyCount, 2);
+    assert.strictEqual(d.currentKeyCount, 1);
+    assert.deepStrictEqual(d.added.map((k) => k.fingerprint), [keyC.fingerprint]);
+    assert.strictEqual(d.removed.length, 0);
+    assert.strictEqual(d.emptyBackup, false);
+  });
+
+  const restored = await call('/api/backups/restore', { sid: s1.sid, name: bkKeep });
+  test('恢复备份：整文件还原、生成新备份并回读校验', () => {
+    assert.strictEqual(restored.changed, true);
+    assert.ok(FS.get(AUTH_PATH).includes(keyC.publicKeyLine));
+    assert.ok(FS.get(AUTH_PATH).includes('# 注释留在备份里'));
+    assert.ok(restored.steps.some((s) => s.includes('已备份原文件')), '恢复前必须再备份当前文件');
+    assert.ok(restored.session.items.some((i) => i.fingerprint === keyC.fingerprint));
+  });
+
+  const restoredAgain = await call('/api/backups/restore', { sid: s1.sid, name: bkKeep });
+  test('恢复内容与当前完全一致时不重复写入', () => {
+    assert.strictEqual(restoredAgain.changed, false);
+    assert.ok(restoredAgain.message.includes('完全一致'));
+  });
+
+  const beforeEmpty = FS.get(AUTH_PATH);
+  await assertRejects(
+    () => call('/api/backups/restore', { sid: s1.sid, name: bkEmpty }),
+    /没有任何可用的密钥|清空/,
+    '空备份被硬拒绝（防清空 authorized_keys）'
+  );
+  test('空备份被拒后文件原样保留', () => assert.strictEqual(FS.get(AUTH_PATH), beforeEmpty));
+
+  const forceGate = await call('/api/backups/restore', { sid: s1.sid, name: bkOther });
+  test('备份不含当前登录钥匙时先拦下并要求 force', () => {
+    assert.strictEqual(forceGate.changed, false);
+    assert.strictEqual(forceGate.needsForce, true);
+    assert.ok(FS.get(AUTH_PATH).includes(keyA.publicKeyLine), '未确认前不能改动文件');
+  });
+
+  const forced = await call('/api/backups/restore', { sid: s1.sid, name: bkOther, force: true });
+  test('确认 force 后可以恢复（本次会话仍能操作）', () => {
+    assert.strictEqual(forced.changed, true);
+    assert.ok(FS.get(AUTH_PATH).includes(keyC.publicKeyLine.split(' ')[1]));
+    assert.ok(!FS.get(AUTH_PATH).includes(keyA.publicKeyLine.split(' ')[1]));
+  });
+
+  const backToKeep = await call('/api/backups/restore', { sid: s1.sid, name: bkKeep, force: true });
+  test('可以从备份恢复回包含登录钥匙的版本', () => {
+    assert.strictEqual(backToKeep.changed, true);
+    assert.ok(FS.get(AUTH_PATH).includes(keyA.publicKeyLine));
+  });
+
+  // 收尾：把恢复带回来的 keyC 再删掉，让文件回到只剩 keyA（后续终端测试依赖它）
+  await call('/api/delete', { sid: s1.sid, fingerprints: [keyC.fingerprint] });
+
+  const traversal = await request(
+    'GET',
+    `/api/backups/diff?sid=${encodeURIComponent(s1.sid)}&name=${encodeURIComponent('../../etc/passwd')}`,
+    null
+  );
+  test('差异接口拒绝路径穿越', () => {
+    assert.strictEqual(traversal.json.ok, false);
+    assert.ok(/备份文件名不合法/.test(traversal.json.error));
+  });
+
+  await assertRejects(
+    () => call('/api/backups/restore', { sid: s1.sid, name: `authorized_keys.bak.20260102000000/../../x` }),
+    /备份文件名不合法/,
+    '恢复接口拒绝带路径的备份名'
+  );
+
+  await assertRejects(
+    () => call('/api/backups/restore', { sid: s1.sid, name: 'authorized_keys.bak.19990101000000' }),
+    /备份文件不存在/,
+    '不存在的备份会提示刷新列表'
   );
 
   console.log('\n[内置终端]');

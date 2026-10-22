@@ -354,6 +354,124 @@ test('主机名大小写与默认端口归一', () => {
   assert.ok(knownhosts.get('CASE.EXAMPLE'));
 });
 
+console.log('\n[本地钥匙备注]');
+
+const store = require('../src/store');
+
+test('备注保存：换行/制表符归一化为空格并落盘', () => {
+  const notes = store.setKeyNote(ed1.fingerprint, '  张三的 MacBook\n\t备用  ');
+  assert.strictEqual(notes[ed1.fingerprint].note, '张三的 MacBook 备用');
+  assert.ok(notes[ed1.fingerprint].updatedAt > 0);
+  const persisted = store.listKeyNotes();
+  assert.strictEqual(persisted[ed1.fingerprint].note, '张三的 MacBook 备用');
+});
+
+test('备注最多 200 字，空备注等于删除', () => {
+  assert.throws(() => store.setKeyNote(ed1.fingerprint, 'x'.repeat(201)), /最多 200/);
+  const notes = store.setKeyNote(ed1.fingerprint, '');
+  assert.ok(!(ed1.fingerprint in notes), '空备注应删除条目');
+  assert.ok(!(ed1.fingerprint in store.listKeyNotes()), '删除也要落盘');
+});
+
+test('备注拒绝非法指纹', () => {
+  assert.throws(() => store.setKeyNote('not-a-fingerprint', 'x'), /指纹格式/);
+  assert.throws(() => store.setKeyNote('', 'x'), /指纹格式/);
+});
+
+test('备注文件里的非法条目会被过滤，不影响其余备注', () => {
+  fs.writeFileSync(
+    store.NOTES_PATH,
+    JSON.stringify({
+      version: 1,
+      notes: {
+        bad: { note: '没有合法指纹' },
+        [ed2.fingerprint]: { note: '  正常备注  ' },
+        [rsa1.fingerprint]: { note: '   ' },
+      },
+    })
+  );
+  const notes = store.listKeyNotes();
+  assert.deepStrictEqual(Object.keys(notes), [ed2.fingerprint]);
+  assert.strictEqual(notes[ed2.fingerprint].note, '正常备注');
+});
+
+test('备注文件损坏时备份坏文件并按空表继续', () => {
+  fs.writeFileSync(store.NOTES_PATH, '{ broken json', 'utf8');
+  const notes = store.listKeyNotes();
+  assert.deepStrictEqual(notes, {});
+  const badFiles = fs.readdirSync(TEST_DATA_DIR).filter((n) => n.startsWith('key-notes.json.bad-'));
+  assert.ok(badFiles.length >= 1, '应保留坏文件备份，方便排查');
+  fs.rmSync(store.NOTES_PATH, { force: true });
+});
+
+console.log('\n[备份列表与差异]');
+
+const backupsMod = require('../src/backups');
+const RP = '/home/alice/.ssh/authorized_keys';
+
+test('备份名解析：合法时间戳按年月日时分秒展示', () => {
+  const p = backupsMod.parseBackupName(RP, 'authorized_keys.bak.20261022093015');
+  assert.strictEqual(p.stamp, '20261022093015');
+  assert.strictEqual(p.displayTime, '2026-10-22 09:30:15');
+  assert.strictEqual(backupsMod.displayTime('20261022093015'), '2026-10-22 09:30:15');
+});
+
+test('备份名拒绝路径穿越、错误前缀与非法时间戳', () => {
+  const bads = [
+    '../authorized_keys.bak.20261022093015',
+    'other.bak.20261022093015',
+    'authorized_keys.bak.2026102209301',
+    'authorized_keys.bak.20261022093015/../x',
+    'authorized_keys.bak.2026102209301a',
+    'authorized_keys.bak.20261022093015.bak.20261022093015',
+    'C:\\authorized_keys.bak.20261022093015',
+    '',
+  ];
+  for (const bad of bads) {
+    assert.strictEqual(backupsMod.parseBackupName(RP, bad), null, `应拒绝：${bad}`);
+  }
+});
+
+test('backupPathFor 只按 remotePath + 合法后缀重新拼路径', () => {
+  assert.strictEqual(
+    backupsMod.backupPathFor(RP, 'authorized_keys.bak.20261022093015'),
+    `${RP}.bak.20261022093015`
+  );
+  assert.throws(
+    () => backupsMod.backupPathFor(RP, '../authorized_keys.bak.20261022093015'),
+    /不合法/
+  );
+});
+
+test('差异方向：added = 恢复后会出现的钥匙，removed = 会消失的钥匙', () => {
+  const cur = [ed1.publicKeyLine, ed2.publicKeyLine, 'garbage-line', ed1.publicKeyLine].join('\n') + '\n';
+  const bak = ['# 备份里的注释', ed2.publicKeyLine, rsa1.publicKeyLine, 'garbage-line'].join('\n') + '\n';
+  const d = backupsMod.diffBackup(cur, bak, ed2.fingerprint);
+
+  assert.strictEqual(d.currentKeyCount, 2, '当前重复的公钥只算一把');
+  assert.strictEqual(d.backupKeyCount, 2);
+  assert.strictEqual(d.sameCount, 1);
+  assert.deepStrictEqual(d.added.map((k) => k.fingerprint), [rsa1.fingerprint]);
+  assert.deepStrictEqual(d.removed.map((k) => k.fingerprint), [ed1.fingerprint]);
+  assert.strictEqual(d.currentMalformed, 1);
+  assert.strictEqual(d.backupMalformed, 1);
+  assert.strictEqual(d.emptyBackup, false);
+  assert.strictEqual(d.usedKeyInBackup, true);
+});
+
+test('差异识别空备份与登录钥匙缺失', () => {
+  const cur = `${keygen.generateEd25519('lonely').publicKeyLine}\n`;
+  const empty = backupsMod.diffBackup(cur, '# 只有注释\n', ed1.fingerprint);
+  assert.strictEqual(empty.emptyBackup, true);
+  assert.strictEqual(empty.usedKeyInBackup, false);
+
+  const missing = backupsMod.diffBackup(cur, ed2.publicKeyLine + '\n', ed1.fingerprint);
+  assert.strictEqual(missing.usedKeyInBackup, false);
+
+  const noKeyAuth = backupsMod.diffBackup(cur, ed2.publicKeyLine + '\n', '');
+  assert.strictEqual(noKeyAuth.usedKeyInBackup, null, '密码会话无法判定');
+});
+
 console.log('\n[版本一致性]');
 
 const version = require('../src/version');

@@ -2,9 +2,17 @@
 
 import { $, state, toast, logLine, api, setSessionLostHandler } from './core.js';
 import { openHostModal, openSettingsModal, renderHosts } from './hosts.js';
-import { renderLocal, renderServer, alignSplitter, rescanLocal, bindLocalTools } from './keys.js';
+import {
+  renderLocal,
+  renderServer,
+  alignSplitter,
+  rescanLocal,
+  bindLocalTools,
+  bindServerTools,
+} from './keys.js';
 import { doConnect, refreshSession, disconnect, handleSessionLost } from './connect.js';
 import { openAddModal, askDelete } from './actions.js';
+import { openBackupsModal } from './backups.js';
 import { toggleSshdFromBadge } from './sshd.js';
 import {
   openTerminal,
@@ -35,10 +43,12 @@ function bind() {
   $('btnSettings').addEventListener('click', openSettingsModal);
   $('btnRescan').addEventListener('click', rescanLocal);
   bindLocalTools();
+  bindServerTools();
 
   $('btnRefresh').addEventListener('click', refreshSession);
   $('btnDisconnect').addEventListener('click', disconnect);
   $('btnAdd').addEventListener('click', openAddModal);
+  $('btnBackups').addEventListener('click', openBackupsModal);
   // 状态列里的登录方式徽章是动态渲染的，用事件委托
   $('keyBody').addEventListener('click', (e) => {
     if (e.target.closest('[data-sshd-toggle]')) toggleSshdFromBadge();
@@ -135,6 +145,7 @@ async function boot() {
     if (s.version) $('version').textContent = s.version;
     state.hosts = s.hosts;
     state.settings = s.settings;
+    state.keyNotes = s.keyNotes || {};
     state.localKeys = s.localKeys;
     renderHosts();
     renderLocal();
