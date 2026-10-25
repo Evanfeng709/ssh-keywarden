@@ -1,0 +1,40 @@
+appId: io.github.evanfeng709.ssh-keywarden
+productName: SSH Keywarden
+copyright: Copyright © 2026 SSH Keywarden
+
+directories:
+  output: dist
+  buildResources: build
+
+files:
+  - "**/*"
+  - "!tests/**"
+  - "!data/**"
+  - "!dist/**"
+  - "!*.md"
+  - "!*.cmd"
+  - "!.github/**"
+  - "!.git/**"
+  - "!node_modules/cpu-features/**"
+  - "!node_modules/nan/**"
+
+asar: true
+npmRebuild: false
+
+win:
+  icon: build/icon.png
+  target:
+    - target: nsis
+      arch:
+        - x64
+    - target: zip
+      arch:
+        - x64
+
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: SSH Keywarden

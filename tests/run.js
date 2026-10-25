@@ -472,6 +472,62 @@ test('差异识别空备份与登录钥匙缺失', () => {
   assert.strictEqual(noKeyAuth.usedKeyInBackup, null, '密码会话无法判定');
 });
 
+console.log('\n[桌面数据目录]');
+
+const desktopData = require('../electron/data-dir');
+const DDTMP = fs.mkdtempSync(path.join(os.tmpdir(), 'kw-datadir-'));
+
+test('KW_DATA_DIR 优先于 userData', () => {
+  const custom = path.join(DDTMP, 'custom');
+  assert.strictEqual(
+    desktopData.resolveDataDir({ userData: path.join(DDTMP, 'u'), env: { KW_DATA_DIR: custom } }),
+    path.resolve(custom)
+  );
+});
+
+test('未设置 KW_DATA_DIR 时落到 userData/data', () => {
+  assert.strictEqual(
+    desktopData.resolveDataDir({ userData: path.join(DDTMP, 'u'), env: {} }),
+    path.join(DDTMP, 'u', 'data')
+  );
+});
+
+test('空目标目录会复制三个数据文件，跳过无关文件', () => {
+  const src = path.join(DDTMP, 'old');
+  fs.mkdirSync(src, { recursive: true });
+  for (const f of ['config.json', 'known_hosts.json', 'key-notes.json', 'junk.txt']) {
+    fs.writeFileSync(path.join(src, f), '{}');
+  }
+  const dst = path.join(DDTMP, 'new');
+  const result = desktopData.migrateData(dst, [src]);
+  assert.strictEqual(result.migrated, true);
+  assert.strictEqual(result.from, src);
+  assert.deepStrictEqual(result.copied.sort(), ['config.json', 'key-notes.json', 'known_hosts.json']);
+  assert.ok(fs.existsSync(path.join(dst, 'config.json')));
+  assert.ok(!fs.existsSync(path.join(dst, 'junk.txt')), '无关文件不应复制');
+});
+
+test('目标已有 config.json 时不覆盖', () => {
+  const src = path.join(DDTMP, 'old2');
+  const dst = path.join(DDTMP, 'existing');
+  fs.mkdirSync(src, { recursive: true });
+  fs.mkdirSync(dst, { recursive: true });
+  fs.writeFileSync(path.join(src, 'config.json'), '{"from":"src"}');
+  fs.writeFileSync(path.join(dst, 'config.json'), '{"from":"dst"}');
+  const result = desktopData.migrateData(dst, [src]);
+  assert.strictEqual(result.migrated, false);
+  assert.strictEqual(fs.readFileSync(path.join(dst, 'config.json'), 'utf8'), '{"from":"dst"}');
+});
+
+test('候选目录没有 config.json 时跳过', () => {
+  const empty = path.join(DDTMP, 'empty');
+  fs.mkdirSync(empty, { recursive: true });
+  fs.writeFileSync(path.join(empty, 'known_hosts.json'), '{}');
+  const result = desktopData.migrateData(path.join(DDTMP, 'fresh'), [empty]);
+  assert.strictEqual(result.migrated, false);
+  assert.strictEqual(result.copied.length, 0);
+});
+
 console.log('\n[版本一致性]');
 
 const version = require('../src/version');
@@ -503,5 +559,6 @@ test('锁文件全部指向官方 npm registry', () => {
 console.log(`\n结果：${passed} 通过，${failed} 失败\n`);
 try {
   fs.rmSync(TEST_DATA_DIR, { recursive: true, force: true });
+  fs.rmSync(DDTMP, { recursive: true, force: true });
 } catch {}
 process.exit(failed ? 1 : 0);

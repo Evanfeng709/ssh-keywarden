@@ -20,7 +20,7 @@ let serverToolsBound = false;
 
 async function rescanLocal() {
   try {
-    const data = await api(`/api/local-keys?dir=${encodeURIComponent(state.settings.localKeyDir || '')}`);
+    const data = await api(`/api/local-keys?dir=${encodeURIComponent(state.settings.localKeyDir || '')}&force=1`);
     state.localKeys = data;
     renderLocal();
     renderServer();

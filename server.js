@@ -25,11 +25,20 @@ const knownhosts = require('./src/knownhosts');
 const ssh = require('./src/ssh');
 const backups = require('./src/backups');
 
-const PORT = Number(process.env.PORT) || 7791;
+const DEFAULT_PORT = 7791;
+const REQUESTED_PORT = process.env.PORT === undefined ? DEFAULT_PORT : Number(process.env.PORT);
 const BIND = '127.0.0.1';
 const TOKEN = crypto.randomBytes(18).toString('hex');
 const SESSION_IDLE_MS = 30 * 60 * 1000;
 const PUBLIC_DIR = path.join(__dirname, 'public');
+
+/** 实际监听端口（PORT=0 时由系统分配），Host 校验要用它 */
+let boundPort = Number.isFinite(REQUESTED_PORT) ? REQUESTED_PORT : DEFAULT_PORT;
+/** 是否在访问首页时自动下发会话 Cookie；桌面版关掉，由主进程直接注入 */
+let autoCookie = process.env.KW_NO_AUTO_COOKIE !== '1';
+/** 本地密钥库扫描缓存，默认关闭；桌面版设为 60s，避免 OneDrive 按需文件每次开页面都全盘读 */
+let scanCacheMs = Math.max(0, Number(process.env.KW_SCAN_CACHE_MS) || 0);
+const scanCache = new Map();
 
 /** 内存会话：sid -> {...} */
 const sessions = new Map();
@@ -117,6 +126,22 @@ function expandPath(p, home) {
   if (t.startsWith('~/')) return `${home}/${t.slice(2)}`;
   if (t.startsWith('/')) return t;
   return `${home}/${t}`;
+}
+
+/** 带缓存的密钥库扫描；force=true 时忽略缓存（手动「重新扫描」用） */
+function scanLocal(dir, force = false) {
+  const key = path.resolve(String(dir || '.'));
+  if (!force && scanCacheMs > 0) {
+    const hit = scanCache.get(key);
+    if (hit && Date.now() - hit.at < scanCacheMs) return hit.result;
+  }
+  const result = scanKeys(dir);
+  if (scanCacheMs > 0) scanCache.set(key, { at: Date.now(), result });
+  return result;
+}
+
+function invalidateScan(dir) {
+  scanCache.delete(path.resolve(String(dir || '.')));
 }
 
 function stamp() {
@@ -561,6 +586,7 @@ function saveKeyPair(dir, gen, nameLabel) {
   }
   fs.writeFileSync(privPath, gen.privateKeyPem, { encoding: 'utf8', mode: 0o600 });
   fs.writeFileSync(`${privPath}.pub`, `${gen.publicKeyLine}\n`, { encoding: 'utf8', mode: 0o644 });
+  invalidateScan(targetDir);
   return { privateKey: privPath, publicKey: `${privPath}.pub` };
 }
 
@@ -1108,7 +1134,7 @@ const ALLOWED_VENDOR = /^\/vendor\/[A-Za-z0-9._-]+\.(js|css)$/;
 
 function hostAllowed(req) {
   const h = String(req.headers.host || '').toLowerCase();
-  return h === `127.0.0.1:${PORT}` || h === `localhost:${PORT}` || h === `127.0.0.1` || h === `localhost`;
+  return h === `127.0.0.1:${boundPort}` || h === `localhost:${boundPort}` || h === `127.0.0.1` || h === `localhost`;
 }
 
 function tokenEqual(value) {
@@ -1132,7 +1158,7 @@ async function handleApi(req, res, pathname, url) {
 
   if (pathname === '/api/state' && method === 'GET') {
     const settings = currentSettings();
-    const scan = settings.localKeyDir ? scanKeys(settings.localKeyDir) : { entries: [], errors: [] };
+    const scan = settings.localKeyDir ? scanLocal(settings.localKeyDir) : { entries: [], errors: [] };
     return ok(res, {
       version: APP_VERSION,
       hosts: store.listHosts(),
@@ -1215,7 +1241,8 @@ async function handleApi(req, res, pathname, url) {
   if (pathname === '/api/local-keys' && method === 'GET') {
     const dir = url.searchParams.get('dir') || currentSettings().localKeyDir;
     if (!dir) return ok(res, { dir: '', entries: [], errors: [] });
-    const scan = scanKeys(dir);
+    const force = url.searchParams.get('force') === '1';
+    const scan = scanLocal(dir, force);
     return ok(res, { dir, entries: scan.entries, errors: scan.errors });
   }
 
@@ -1352,7 +1379,7 @@ const server = http.createServer(async (req, res) => {
       'Cache-Control': 'no-store',
       'X-Content-Type-Options': 'nosniff',
     };
-    if (pathname === '/index.html') {
+    if (pathname === '/index.html' && autoCookie) {
       headers['Set-Cookie'] = `kw=${TOKEN}; Path=/; HttpOnly; SameSite=Strict`;
     }
     res.writeHead(200, headers);
@@ -1395,15 +1422,6 @@ if (wss) {
   });
 }
 
-server.on('error', (e) => {
-  if (e.code === 'EADDRINUSE') {
-    console.error(`端口 ${PORT} 已被占用。可以换端口启动：set PORT=7792 && node server.js`);
-    process.exit(1);
-  }
-  console.error('服务启动失败:', e.message);
-  process.exit(1);
-});
-
 /** 首次启动：把 ~/.ssh/config 里现成的主机导进来，省得手抄 */
 function bootstrapHosts() {
   try {
@@ -1424,34 +1442,85 @@ function bootstrapHosts() {
   }
 }
 
-server.listen(PORT, BIND, () => {
-  bootstrapHosts();
-  const settings = currentSettings();
-  log('SSH Keywarden 已启动');
-  console.log(`   打开：http://${BIND}:${PORT}`);
-  console.log(`   本地密钥目录：${settings.localKeyDir || '(未设置，请在页面右上角设置)'}`);
-  if (!fs.existsSync(path.join(PUBLIC_DIR, 'vendor', 'xterm.js'))) {
-    console.log('   提示：public/vendor/xterm.js 缺失，内置终端不可用（可从 node_modules/@xterm/xterm/lib 复制）');
-  }
-  console.log('   按 Ctrl+C 停止');
-});
-
-function shutdown() {
-  for (const s of sessions.values()) {
-    try {
-      s.client.end();
-    } catch {}
-  }
-  sessions.clear();
-  server.close(() => process.exit(0));
-  setTimeout(() => process.exit(0), 500).unref();
+/** 关闭服务：断开会话与终端连接，等 HTTP 端口释放 */
+function stopServer() {
+  if (stopServer.pending) return stopServer.pending;
+  stopServer.pending = new Promise((resolve) => {
+    for (const s of sessions.values()) {
+      try {
+        s.client.end();
+      } catch {}
+    }
+    sessions.clear();
+    if (wss) {
+      for (const ws of wss.clients) {
+        try {
+          ws.close();
+        } catch {}
+      }
+    }
+    if (!server.listening) return resolve();
+    server.close(() => resolve());
+    setTimeout(resolve, 500).unref();
+  });
+  return stopServer.pending;
 }
 
-process.on('SIGINT', shutdown);
-process.on('SIGTERM', shutdown);
+/**
+ * 启动 HTTP 服务（CLI 与 Electron 共用）。
+ * @param {{port?:number, autoCookie?:boolean, scanCacheMs?:number}} [options]
+ * @returns {Promise<{port:number, token:string, close:()=>Promise<void>}>}
+ */
+function startServer(options = {}) {
+  if (options.autoCookie === false) autoCookie = false;
+  if (Number.isFinite(options.scanCacheMs)) scanCacheMs = Math.max(0, options.scanCacheMs);
+  const port = Number.isFinite(options.port) ? options.port : REQUESTED_PORT;
+
+  if (server.listening) return Promise.reject(new Error('服务已经在运行'));
+  return new Promise((resolve, reject) => {
+    const onError = (e) => reject(e);
+    server.once('error', onError);
+    server.listen(port, BIND, () => {
+      server.removeListener('error', onError);
+      server.on('error', (e) => log('服务异常:', e.message));
+      boundPort = server.address().port;
+      bootstrapHosts();
+      log(`SSH Keywarden 已启动（${BIND}:${boundPort}）`);
+      resolve({ port: boundPort, token: TOKEN, close: stopServer });
+    });
+  });
+}
+
+if (require.main === module) {
+  startServer()
+    .then(({ port }) => {
+      const settings = currentSettings();
+      console.log(`   打开：http://${BIND}:${port}`);
+      console.log(`   本地密钥目录：${settings.localKeyDir || '(未设置，请在页面右上角设置)'}`);
+      if (!fs.existsSync(path.join(PUBLIC_DIR, 'vendor', 'xterm.js'))) {
+        console.log('   提示：public/vendor/xterm.js 缺失，内置终端不可用（可从 node_modules/@xterm/xterm/lib 复制）');
+      }
+      console.log('   按 Ctrl+C 停止');
+    })
+    .catch((e) => {
+      if (e.code === 'EADDRINUSE') {
+        console.error(`端口 ${REQUESTED_PORT} 已被占用。可以换端口启动：set PORT=7792 && node server.js`);
+      } else {
+        console.error('服务启动失败:', e.message);
+      }
+      process.exit(1);
+    });
+
+  const shutdown = () => stopServer().then(() => process.exit(0));
+  process.on('SIGINT', shutdown);
+  process.on('SIGTERM', shutdown);
+}
+
 process.on('uncaughtException', (e) => {
   log('未捕获异常:', e.stack || e.message);
 });
 process.on('unhandledRejection', (e) => {
   log('未处理的 Promise 拒绝:', (e && e.stack) || e);
 });
+
+module.exports = { startServer, stopServer, TOKEN };

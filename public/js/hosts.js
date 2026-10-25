@@ -186,6 +186,17 @@ function openHostModal(hostId) {
 
 function openSettingsModal() {
   const s = state.settings;
+  const isDesktop = Boolean(window.keywarden && window.keywarden.isDesktop);
+  const desktopBlock = isDesktop
+    ? `
+    <div class="field">
+      <label>桌面版数据</label>
+      <div class="row">
+        <button type="button" id="s_open_data" style="flex:0 0 auto">打开数据目录</button>
+      </div>
+      <div class="hint">配置、主机指纹与备注都在这里；从旧版本迁移时，把 config.json / known_hosts.json / key-notes.json 复制进去即可。</div>
+    </div>`
+    : '';
   const bodyHtml = `
     <div class="field">
       <label>本地密钥库目录</label>
@@ -205,7 +216,7 @@ function openSettingsModal() {
     <div class="field">
       <label>默认 authorized_keys 路径</label>
       <input type="text" id="s_remote" placeholder="留空 = ~/.ssh/authorized_keys" value="${escapeHtml(s.remotePath || '')}" />
-    </div>`;
+    </div>${desktopBlock}`;
 
   const foot = `<button data-close>取消</button><button class="primary" id="s_save">保存</button>`;
 
@@ -217,6 +228,13 @@ function openSettingsModal() {
       m.querySelectorAll('[data-close]').forEach((b) => b.addEventListener('click', () => closeModal(m)));
       attachDirPicker(m, 's_keydir', 's_keydir_browse');
       attachDirPicker(m, 's_savedir', 's_savedir_browse');
+      const openData = m.querySelector('#s_open_data');
+      if (openData) {
+        openData.addEventListener('click', async () => {
+          const err = await window.keywarden.openDataDir();
+          if (err) toast(err, 'err');
+        });
+      }
       m.querySelector('#s_save').addEventListener('click', async () => {
         try {
           state.settings = await api('/api/settings', {

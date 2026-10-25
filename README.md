@@ -2,7 +2,7 @@
 
 [![test](https://github.com/Evanfeng709/ssh-keywarden/actions/workflows/test.yml/badge.svg)](https://github.com/Evanfeng709/ssh-keywarden/actions/workflows/test.yml)
 
-本地 SSH 授权密钥管理台 —— 一个跑在自己电脑上的小网页，用来打理服务器上的 `~/.ssh/authorized_keys`。
+本地 SSH 授权密钥管理台 —— 桌面版双击即用，也保留浏览器模式，用来打理服务器上的 `~/.ssh/authorized_keys`。
 
 解决的就是这几件烦心事：服务器上堆了一堆不知道是谁的钥匙、换机器后想把登录钥匙换掉、想给新设备加一把、想把早就不用的删掉。
 
@@ -22,6 +22,16 @@
 
 ## 快速开始
 
+**桌面版**：
+
+```bash
+npm install
+npm run app        # 开发态直接开桌面窗口
+npm run dist       # 打 Windows 安装包 + 免安装 zip（输出到 dist/）
+```
+
+**浏览器模式**：
+
 **方式一**：双击 `start.cmd`（首次会自动装依赖并打开浏览器）。
 
 **方式二**：
@@ -37,8 +47,16 @@ npm start        # → http://127.0.0.1:7791
 
 首次启动会自动做两件事，省得手抄配置：
 
-1. 读 `~/.ssh/config`，把里面的 Host 导入成主机列表；
+1. 读 `~/.ssh/config`，把里面的 Host 导入成主机列表（仅当主机列表为空时导入一次）；
 2. 从 `IdentityFile` 往上找「密钥文件最多」的那层目录，作为本地密钥库的默认扫描目录。
+
+## 桌面版
+
+- **数据目录**：`%APPDATA%\ssh-keywarden\data`（`config.json` / `known_hosts.json` / `key-notes.json`）。首次启动若安装目录旁存在旧的 `data/`，会自动迁移；也可用 `KW_DATA_DIR` 指定别处。
+- **会话边界**：服务仍只监听 `127.0.0.1`，但改用随机端口，并**关闭「访问首页即发 Cookie」**；令牌由主进程直接写进 Electron 会话，本机其他进程扫到端口也拿不到会话。
+- **渲染进程**：关闭 Node、启用沙箱；「浏览…」走系统文件对话框，支持 OneDrive 占位符路径与带空格的目录。
+- **密钥库**：扫描结果缓存 60 秒，点「重新扫描」强制刷新。OneDrive 目录建议设为「始终保留在此设备上」，否则首次扫描会触发占位符下载。
+- **打包**：只出 Windows x64（NSIS 安装包 + zip），未签名，首次运行可能弹 SmartScreen；不含自动更新。
 
 ## 关于安全
 
@@ -46,7 +64,7 @@ npm start        # → http://127.0.0.1:7791
 
 - **只监听 `127.0.0.1`**，并严格校验 `Host` 头（挡 DNS rebinding）；
 - **首次连接确认主机指纹**：指纹保存在本机 `data/known_hosts.json`，之后主机密钥变化会被拦下并要求确认，防止中间人冒充服务器；
-- 会话用 `SameSite=Strict` 的 HttpOnly Cookie（挡浏览器里的其他网页伪造请求）；
+- 会话用 `SameSite=Strict` 的 HttpOnly Cookie（挡浏览器里的其他网页伪造请求）；桌面版由主进程注入令牌，不在首页自动下发；
 - **密码只在内存里**，不写配置文件；配置只存「怎么连」（地址/端口/用户名/私钥路径）；
 - 每次写盘前**自动备份**为 `authorized_keys.bak.YYYYMMDDHHMMSS`；
 - **备份恢复**同样先备份当前文件、原子写入并回读校验；空备份硬拒绝，备份不含当前登录钥匙时必须显式强制；
@@ -67,7 +85,13 @@ npm start        # → http://127.0.0.1:7791
 
 ```
 ssh-keywarden/
-├── server.js              HTTP 服务 + 业务编排
+├── server.js              HTTP 服务 + 业务编排（可被 CLI / Electron 启动）
+├── electron/
+│   ├── main.js            桌面主进程：内置服务、注入 Cookie、窗口与 IPC
+│   ├── preload.js         只暴露选文件 / 选目录 / 打开数据目录
+│   └── data-dir.js        桌面数据目录解析与迁移
+├── electron-builder.yml   安装包配置（NSIS + zip）
+├── build/                 应用图标（icon.svg / icon.png）与渲染脚本
 ├── src/
 │   ├── version.js         版本号单一来源
 │   ├── keygen.js          公钥解析、SHA256 指纹、密钥对生成
@@ -82,8 +106,10 @@ ssh-keywarden/
 │   ├── js/                页面逻辑（ES modules：core/hosts/keys/actions/backups/connect/terminal…）
 │   └── vendor/            xterm.js 及其样式（UMD，直接从 node_modules 复制，运行时无需构建）
 ├── tests/
-│   ├── run.js             单元测试（解析/生成/扫描/备注/备份差异）
-│   └── e2e.js             端到端（内置一个内存 SSH 服务端，跑完四条主流程 + 备注 / 备份恢复）
+│   ├── run.js             单元测试（解析/生成/扫描/备注/备份差异/数据目录）
+│   ├── e2e.js             端到端（内置内存 SSH 服务端，跑完四条主流程 + 备注 / 备份恢复）
+│   ├── desktop-server.js  桌面模式（随机端口 / 不发 Cookie / Host 校验 / 扫描缓存）
+│   └── electron-smoke.js  真实 Electron 窗口冒烟（Windows）
 └── data/config.json       运行时生成的主机与设置（同目录：known_hosts.json、key-notes.json）
 ```
 
@@ -93,8 +119,10 @@ ssh-keywarden/
 npm test
 ```
 
-- 单元测试验证解析规则、指纹格式、密钥生成能被 `ssh2` 回读，以及备注存储、备份名校验与差异方向；
-- 端到端测试在本机起一个真实 SSH 服务端（内存文件系统），把「查看 → 新增 → 重复新增 → 粘贴垃圾 → 更换 → 删除 → 防锁死 → 备注 → 备份列表 / 差异 / 恢复」全跑一遍，断言文件内容与备份。
+- 单元测试验证解析规则、指纹格式、密钥生成能被 `ssh2` 回读，以及备注存储、备份名校验、差异方向与桌面数据目录迁移；
+- 端到端测试在本机起一个真实 SSH 服务端（内存文件系统），把「查看 → 新增 → 重复新增 → 粘贴垃圾 → 更换 → 删除 → 防锁死 → 备注 → 备份列表 / 差异 / 恢复」全跑一遍，断言文件内容与备份；
+- 桌面模式测试覆盖随机端口、关闭自动发 Cookie、Host 校验与扫描缓存；
+- `npm run test:app` 启动真实 Electron 窗口做冒烟（Windows），检查桌面桥接、页面渲染与 Cookie 注入；打包后可加 `KW_APP_EXE=dist/win-unpacked/"SSH Keywarden.exe"` 复跑同一套检查。
 
 指纹算法已与 `ssh-keygen -lf` 逐一比对一致；生成的私钥可直接被 `ssh-keygen -y` 解析。
 
@@ -112,6 +140,7 @@ npm test
 - 无法自动验证「新钥匙能否登录」时（例如粘贴的公钥在本地没有对应私钥），默认**不删旧钥匙**，需要手动勾选强制。
 - 备份不会自动清理；备份名精确到秒，同一秒内连续两次写盘可能落在同一个备份文件（后一次覆盖前一次）。
 - 不走跳板机 / ProxyJump。
+- 桌面安装包只做 Windows x64，未签名、无自动更新；密钥库位于 OneDrive 等按需同步目录时，首次扫描会触发下载。
 
 ## 许可
 

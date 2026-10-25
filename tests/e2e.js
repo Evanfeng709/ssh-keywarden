@@ -333,8 +333,10 @@ async function main() {
   await new Promise((resolve) => mockServer.listen(0, '127.0.0.1', resolve));
   const mockPort = mockServer.address().port;
 
-  // 起被测服务（同进程内 require，端口已用 env 指定）
-  require('../server.js');
+  // 起被测服务（同进程内调用，端口已用 env 指定）
+  const { startServer, stopServer } = require('../server.js');
+  const started = await startServer();
+  process.env.PORT = String(started.port);
 
   // 等 HTTP 就绪
   for (let i = 0; i < 50; i++) {
@@ -1093,6 +1095,7 @@ async function main() {
   console.log(`\n结果：${passed} 通过，${failed} 失败\n`);
 
   mockServer.close();
+  await stopServer().catch(() => {});
   setTimeout(() => process.exit(failed ? 1 : 0), 200);
 }
 

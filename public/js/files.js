@@ -1,6 +1,9 @@
 'use strict';
 import { $, state, escapeHtml, fmtBytes, toast, openModal, closeModal, api } from './core.js';
 
+/** 桌面版由 preload 注入；浏览器模式为 undefined */
+const desktopBridge = typeof window !== 'undefined' ? window.keywarden : null;
+
 /* ------------------------------------------------------------------ */
 /* 本机文件 / 目录选择器                                               */
 /* ------------------------------------------------------------------ */
@@ -20,6 +23,18 @@ function dirOfPath(p) {
  */
 function openFilePicker(opts) {
   const mode = opts.mode === 'dir' ? 'dir' : 'file';
+
+  // 桌面版直接调系统选择框，路径绝对且支持 OneDrive 占位符
+  if (desktopBridge && desktopBridge.isDesktop) {
+    const pick = mode === 'dir' ? desktopBridge.pickDir : desktopBridge.pickFile;
+    pick({ start: opts.start || '', title: opts.title || '' })
+      .then((picked) => {
+        if (picked) opts.onPick(picked);
+      })
+      .catch((e) => toast(e.message || '打开系统选择框失败', 'err'));
+    return null;
+  }
+
   let curDir = '';
   let selectedFile = '';
   let parentDir = null;
