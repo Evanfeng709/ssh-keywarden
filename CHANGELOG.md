@@ -3,6 +3,38 @@
 > 版本号规则：`v<日期>.<当天第几次更新>`，例如 `v2026.10.19.4` 表示 2026-10-19 当天第 4 次更新。
 > 单一来源是 `src/version.js`；`package.json` 的 `version` 因 semver 限制写成 `2026.10.19-4`（分隔符不同，指同一个版本）。
 
+## v2026.10.25.2 — 2026-10-25
+
+### 修复
+
+- **应用图标圆角外显示白底**：图标渲染从 `capturePage` 改为把 SVG 画进 canvas 后再导出 PNG，保留 alpha 通道；桌面与任务栏快捷方式不再出现方形白底。
+- **桌面数据目录路径文档笔误**：实际路径是 `%APPDATA%\ssh-keywarden\data`，README 已同步。
+
+### 说明
+
+- 安装包与 `app.asar` 中不含任何主机、IP 或私钥路径；主机列表来自首次启动时对本机 `~/.ssh/config` 的导入，且只在列表为空时导入一次。
+
+## v2026.10.25.1 — 2026-10-25
+
+### 新增
+
+- **正式桌面应用（Windows）**：Electron 包裹现有服务与前端，`npm run app` 开发启动，`npm run dist` 输出 NSIS 安装包与免安装 zip。
+  - 主进程内置启动服务，使用系统分配的随机端口；首次启动从安装目录旁的 `data/` 迁移到 `%APPDATA%\ssh-keywarden\data`，可用 `KW_DATA_DIR` 覆盖。
+  - 桌面模式关闭「访问首页即下发 Cookie」：会话令牌由主进程直接写入 Electron 会话，本机其他进程扫到端口也拿不到会话；未授权 API 仍返回 401。
+  - 渲染进程启用 `contextIsolation` + `sandbox`、无 Node、禁止外部导航与新窗口；选私钥 / 选目录走系统对话框，支持 OneDrive 占位符路径。
+  - 单实例、窗口位置记忆、应用图标（蓝色钥匙）。
+- 本地密钥库扫描缓存：桌面模式 60 秒 TTL，点「重新扫描」带 `force=1` 强制刷新；浏览器模式默认不启用，行为不变。
+- `server.js` 拆出 `startServer()` / `stopServer()`，CLI 与 Electron 共用；支持 `PORT=0` 由系统分配端口。
+
+### 测试
+
+- 单元 52 通过、端到端 65 通过、桌面服务端 10 通过，0 失败。
+- 新增 `tests/desktop-server.js`：随机端口、首页不发 Cookie、令牌注入后可访问、Host 头拒绝、缓存命中与强制刷新；密钥目录用带空格与中文的路径验证。
+- 新增 `tests/electron-smoke.js`：启动真实 Electron 窗口，通过 CDP 检查标题、桌面桥接、页面渲染、Cookie 注入与桌面专属设置项；支持用 `KW_APP_EXE` 对打包后的 exe 复跑。
+- 打包实测：NSIS 安装包约 118 MB、免安装 zip 约 148 MB；打包后的 `win-unpacked` exe 冒烟全部通过。
+- 浏览器模式回归：`npm start` 仍自动发 Cookie，原有端到端 65 项全部通过。
+- 桌面版设置弹窗新增「打开数据目录」，方便把旧 `config.json` / `known_hosts.json` / `key-notes.json` 手动迁入。
+
 ## v2026.10.22.1 — 2026-10-22
 
 ### 新增
