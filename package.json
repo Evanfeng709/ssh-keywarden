@@ -1,6 +1,6 @@
 {
   "name": "ssh-keywarden",
-  "version": "2026.10.26-1",
+  "version": "2026.10.26-2",
   "private": true,
   "description": "本地 SSH 授权密钥管理台：查看 / 新增 / 更换 / 清理服务器 authorized_keys",
   "author": "Evanfeng709",
@@ -10,7 +10,7 @@
     "start": "node server.js",
     "app": "electron .",
     "dist": "electron-builder --win",
-    "test": "node tests/run.js && node tests/e2e.js && node tests/desktop-server.js",
+    "test": "node tests/run.js && node tests/theme.js && node tests/e2e.js && node tests/desktop-server.js",
     "test:app": "node tests/electron-smoke.js"
   },
   "engines": {
