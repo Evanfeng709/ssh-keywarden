@@ -21,4 +21,10 @@ contextBridge.exposeInMainWorld('keywarden', {
   },
   readClipboard: () => ipcRenderer.invoke('kw:read-clipboard'),
   writeClipboard: (text) => ipcRenderer.invoke('kw:write-clipboard', text),
+  systemTheme: {
+    get: () => ipcRenderer.invoke('kw:system-theme'),
+    onChange: (cb) => {
+      ipcRenderer.on('kw:system-theme-changed', (_event, dark) => cb(Boolean(dark)));
+    },
+  },
 });

@@ -271,10 +271,64 @@ async function main() {
     await send('Runtime.evaluate', { expression: `window.keywarden.windowControls.toggleMaximize()` });
     const restored = await waitMaxClass(false);
 
+    // 主题：手动切换立即生效并记住；自动主题按系统深浅色落到具体一套
+    const themeResult = await send('Runtime.evaluate', {
+      expression: `(async () => {
+        const theme = await import('/js/theme.js');
+        const store = () => { try { return localStorage.getItem('kw.theme'); } catch { return null; } };
+        const sysDark = await window.keywarden.systemTheme.get();
+        theme.applyTheme('linen', { persist: true });
+        const linen = {
+          applied: document.documentElement.dataset.theme,
+          stored: store(),
+          bg: getComputedStyle(document.body).backgroundColor
+        };
+        theme.applyTheme('auto', { persist: true });
+        const auto = {
+          applied: document.documentElement.dataset.theme,
+          stored: store(),
+          expected: sysDark ? 'obsidian' : 'cloud'
+        };
+        const light = theme.termPalette('linen');
+        return { sysDarkType: typeof sysDark, linen, auto, termLight: light.background, termDark: theme.termPalette('obsidian').background };
+      })()`,
+      awaitPromise: true,
+      returnByValue: true,
+    });
+    const themeState = themeResult.result.value;
+
+    // 删除按钮：没选中时中性禁用，选中后变红并显示计数
+    const deleteResult = await send('Runtime.evaluate', {
+      expression: `(async () => {
+        const core = await import('/js/core.js');
+        const keys = await import('/js/keys.js');
+        const savedSession = core.state.session;
+        core.state.session = { sid: 'smoke', host: { host: 'h', username: 'u' }, server: {}, remotePath: '', stats: { total: 0 } };
+        core.state.selected = new Set();
+        keys.setConnected(true);
+        keys.updateSelectionUi();
+        const del = document.getElementById('btnDelete');
+        const neutral = !del.classList.contains('is-danger') && del.disabled;
+        core.state.selected = new Set(['SHA256:smoke']);
+        keys.updateSelectionUi();
+        const danger =
+          del.classList.contains('is-danger') &&
+          !del.disabled &&
+          document.getElementById('selCount').textContent === '1';
+        core.state.session = savedSession;
+        core.state.selected = new Set();
+        keys.setConnected(false);
+        keys.updateSelectionUi();
+        return { neutral, danger };
+      })()`,
+      awaitPromise: true,
+      returnByValue: true,
+    });
+    const deleteState = deleteResult.result.value;
 
     // 打开设置弹窗，确认桌面专属入口已渲染（不点，避免真的弹出资源管理器）。
     // 页面初始化是异步的，按钮监听可能晚于首次点击，这里重试到弹窗出现。
-    let settings = { hasKeydir: false, hasOpenData: false };
+    let settings = { hasKeydir: false, hasOpenData: false, themeCards: 0, autoSelected: false };
     for (let i = 0; i < 8; i++) {
       await send('Runtime.evaluate', {
         expression: `document.querySelector('#btnSettings').click()`,
@@ -284,12 +338,66 @@ async function main() {
         expression: `({
           hasKeydir: !!document.querySelector('#s_keydir'),
           hasOpenData: !!document.querySelector('#s_open_data'),
+          themeCards: document.querySelectorAll('#themeGrid .theme-card').length,
+          autoSelected: !!document.querySelector('.theme-card[data-choice="auto"].on'),
           masks: document.querySelectorAll('.modal-mask').length
         })`,
         returnByValue: true,
       });
       settings = settingsResult.result.value;
       if (settings.hasKeydir) break;
+    }
+
+    // 点一张卡片即时预览但不落盘，取消后回到原来的主题
+    const previewResult = await send('Runtime.evaluate', {
+      expression: `(async () => {
+        const before = document.documentElement.dataset.theme;
+        document.querySelector('#themeGrid .theme-card[data-choice="linen"]').click();
+        await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+        const live = document.documentElement.dataset.theme;
+        const storedLive = localStorage.getItem('kw.theme');
+        document.querySelector('.modal-mask [data-close]').click();
+        await new Promise((r) => setTimeout(r, 80));
+        return {
+          before,
+          live,
+          storedLive,
+          after: document.documentElement.dataset.theme,
+          masks: document.querySelectorAll('.modal-mask').length
+        };
+      })()`,
+      awaitPromise: true,
+      returnByValue: true,
+    });
+    const preview = previewResult.result.value;
+
+    // 重新打开 → 选雾灰 → 保存，选择应写入 localStorage
+    let saved = { applied: '', stored: '', closed: false };
+    for (let i = 0; i < 8; i++) {
+      await send('Runtime.evaluate', { expression: `document.querySelector('#btnSettings').click()` });
+      await new Promise((r) => setTimeout(r, 250));
+      const ready = await send('Runtime.evaluate', {
+        expression: `!!document.querySelector('#themeGrid .theme-card[data-choice="mist"]')`,
+        returnByValue: true,
+      });
+      if (!ready.result.value) continue;
+      const saveResult = await send('Runtime.evaluate', {
+        expression: `(async () => {
+          document.querySelector('#themeGrid .theme-card[data-choice="mist"]').click();
+          await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+          document.querySelector('#s_save').click();
+          await new Promise((r) => setTimeout(r, 500));
+          return {
+            applied: document.documentElement.dataset.theme,
+            stored: localStorage.getItem('kw.theme'),
+            closed: document.querySelectorAll('.modal-mask').length === 0
+          };
+        })()`,
+        awaitPromise: true,
+        returnByValue: true,
+      });
+      saved = saveResult.result.value;
+      break;
     }
     ws.close();
 
@@ -303,6 +411,19 @@ async function main() {
       ['接口返回 ok', value.apiOk === true],
       ['设置弹窗含密钥库目录', settings.hasKeydir === true],
       ['桌面版设置含「打开数据目录」', settings.hasOpenData === true],
+      ['设置里有 8 套主题可选', settings.themeCards === 8],
+      ['当前自动主题被标记为选中', settings.autoSelected === true],
+      ['主题卡片即时预览', preview.live === 'linen' && preview.before !== 'linen'],
+      ['预览不写 localStorage', preview.storedLive === 'auto'],
+      ['取消后主题回滚', preview.after === preview.before && preview.masks === 0],
+      ['保存后主题被记住', saved.applied === 'mist' && saved.stored === 'mist' && saved.closed === true],
+      ['手动主题立即生效', themeState.linen.applied === 'linen' && themeState.linen.stored === 'linen'],
+      ['浅色主题背景即时换色', themeState.linen.bg === 'rgb(246, 242, 234)'],
+      ['自动主题按系统解析', themeState.auto.applied === themeState.auto.expected && themeState.auto.stored === 'auto'],
+      ['桌面端可读系统深浅色', themeState.sysDarkType === 'boolean'],
+      ['终端调色板区分深浅主题', themeState.termLight === '#fffdf8' && themeState.termDark === '#131920'],
+      ['删除按钮未选中时中性禁用', deleteState.neutral === true],
+      ['删除按钮有选中时变红带计数', deleteState.danger === true],
       ['顶栏标记为桌面版（无边框拖拽）', layout.bodyDesktop === true],
       ['顶栏保持单行高度', layout.topbarHeight > 0 && layout.topbarHeight <= 52],
       ['顶栏含最小化/最大化/关闭按钮', layout.hasWinButtons === true],

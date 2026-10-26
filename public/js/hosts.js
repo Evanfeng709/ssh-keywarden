@@ -2,6 +2,7 @@
 import { $, state, escapeHtml, toast, logLine, openModal, closeModal, api } from './core.js';
 import { dirOfPath, openFilePicker, attachDirPicker } from './files.js';
 import { rescanLocal } from './keys.js';
+import { THEME_CHOICES, currentChoice, applyTheme } from './theme.js';
 
 /* ------------------------------------------------------------------ */
 /* 主机                                                                */
@@ -184,6 +185,22 @@ function openHostModal(hostId) {
   return mask;
 }
 
+function themeCardHtml(t) {
+  const thumb = t.pair
+    ? `<span class="theme-thumb" aria-hidden="true">${t.pair
+        .map((id) => `<span class="tt-half" data-theme="${id}"></span>`)
+        .join('')}</span>`
+    : `<span class="theme-thumb" data-theme="${t.id}" aria-hidden="true">
+        <span class="tt-side"></span>
+        <span class="tt-main"><i></i><i></i><i></i></span>
+      </span>`;
+  return `<button type="button" class="theme-card" data-choice="${t.id}" aria-pressed="false" title="${escapeHtml(
+    t.name
+  )}：${escapeHtml(t.desc)}">${thumb}<span class="theme-name">${escapeHtml(t.name)}<span class="tick">✓</span></span><span class="theme-desc">${escapeHtml(
+    t.desc
+  )}</span></button>`;
+}
+
 function openSettingsModal() {
   const s = state.settings;
   const isDesktop = Boolean(window.keywarden && window.keywarden.isDesktop);
@@ -198,33 +215,67 @@ function openSettingsModal() {
     </div>`
     : '';
   const bodyHtml = `
-    <div class="field">
-      <label>本地密钥库目录</label>
-      <div class="row">
-        <input type="text" id="s_keydir" placeholder="例如 C:\\Users\\xxx\\OneDrive\\密钥" value="${escapeHtml(s.localKeyDir || '')}" style="flex:1" />
-        <button type="button" id="s_keydir_browse" style="flex:0 0 auto">浏览…</button>
+    <div class="form-section">
+      <div class="form-section-head">
+        <h3>外观</h3>
+        <span>点一下立即预览，保存后记住</span>
       </div>
-      <div class="hint">用来扫出本机所有私钥/公钥，跟服务器上的钥匙做指纹比对。</div>
+      <div class="theme-grid" id="themeGrid">${THEME_CHOICES.map(themeCardHtml).join('')}</div>
     </div>
-    <div class="field">
-      <label>新生成密钥的保存目录</label>
-      <div class="row">
-        <input type="text" id="s_savedir" placeholder="留空 = 本地密钥库目录" value="${escapeHtml(s.saveDir || '')}" style="flex:1" />
-        <button type="button" id="s_savedir_browse" style="flex:0 0 auto">浏览…</button>
+    <div class="form-section">
+      <div class="field">
+        <label>本地密钥库目录</label>
+        <div class="row">
+          <input type="text" id="s_keydir" placeholder="例如 C:\\Users\\xxx\\OneDrive\\密钥" value="${escapeHtml(s.localKeyDir || '')}" style="flex:1" />
+          <button type="button" id="s_keydir_browse" style="flex:0 0 auto">浏览…</button>
+        </div>
+        <div class="hint">用来扫出本机所有私钥/公钥，跟服务器上的钥匙做指纹比对。</div>
       </div>
-    </div>
-    <div class="field">
-      <label>默认 authorized_keys 路径</label>
-      <input type="text" id="s_remote" placeholder="留空 = ~/.ssh/authorized_keys" value="${escapeHtml(s.remotePath || '')}" />
-    </div>${desktopBlock}`;
+      <div class="field">
+        <label>新生成密钥的保存目录</label>
+        <div class="row">
+          <input type="text" id="s_savedir" placeholder="留空 = 本地密钥库目录" value="${escapeHtml(s.saveDir || '')}" style="flex:1" />
+          <button type="button" id="s_savedir_browse" style="flex:0 0 auto">浏览…</button>
+        </div>
+      </div>
+      <div class="field">
+        <label>默认 authorized_keys 路径</label>
+        <input type="text" id="s_remote" placeholder="留空 = ~/.ssh/authorized_keys" value="${escapeHtml(s.remotePath || '')}" />
+      </div>${desktopBlock}
+    </div>`;
 
   const foot = `<button data-close>取消</button><button class="primary" id="s_save">保存</button>`;
+
+  const initial = currentChoice();
+  let picked = initial;
+  let committed = false;
 
   openModal({
     title: '设置',
     bodyHtml,
     footHtml: foot,
+    onClose() {
+      // 取消 / 关闭 / 点遮罩：主题回到打开弹窗时的那套
+      if (!committed) applyTheme(initial, { persist: false });
+    },
     onMount(m) {
+      const grid = m.querySelector('#themeGrid');
+      const markChoice = (id) => {
+        grid.querySelectorAll('.theme-card').forEach((card) => {
+          const on = card.dataset.choice === id;
+          card.classList.toggle('on', on);
+          card.setAttribute('aria-pressed', String(on));
+        });
+      };
+      markChoice(initial);
+      grid.addEventListener('click', (e) => {
+        const card = e.target.closest('.theme-card');
+        if (!card) return;
+        picked = card.dataset.choice;
+        applyTheme(picked, { persist: false });
+        markChoice(picked);
+      });
+
       m.querySelectorAll('[data-close]').forEach((b) => b.addEventListener('click', () => closeModal(m)));
       attachDirPicker(m, 's_keydir', 's_keydir_browse');
       attachDirPicker(m, 's_savedir', 's_savedir_browse');
@@ -236,6 +287,8 @@ function openSettingsModal() {
         });
       }
       m.querySelector('#s_save').addEventListener('click', async () => {
+        committed = true;
+        applyTheme(picked, { persist: true });
         try {
           state.settings = await api('/api/settings', {
             method: 'POST',

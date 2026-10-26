@@ -94,8 +94,9 @@ export function shortFp(fp) {
 /* ------------------------------------------------------------------ */
 
 let modalStack = [];
+const closeHooks = new WeakMap();
 
-export function openModal({ title, bodyHtml, footHtml, onMount, width }) {
+export function openModal({ title, bodyHtml, footHtml, onMount, onClose, width }) {
   const mask = document.createElement('div');
   mask.className = 'modal-mask';
   mask.innerHTML = `
@@ -112,6 +113,7 @@ export function openModal({ title, bodyHtml, footHtml, onMount, width }) {
     if (e.target === mask) closeModal(mask);
   });
   mask.querySelector('[data-close]').addEventListener('click', () => closeModal(mask));
+  if (onClose) closeHooks.set(mask, onClose);
   $('modalRoot').appendChild(mask);
   modalStack.push(mask);
   if (onMount) onMount(mask);
@@ -122,6 +124,13 @@ export function closeModal(mask) {
   if (!mask) mask = modalStack[modalStack.length - 1];
   if (!mask) return;
   modalStack = modalStack.filter((m) => m !== mask);
+  const onClose = closeHooks.get(mask);
+  closeHooks.delete(mask);
+  if (onClose) {
+    try {
+      onClose();
+    } catch {}
+  }
   mask.remove();
 }
 

@@ -2,6 +2,7 @@
 import { $, state, toast } from './core.js';
 import { doConnect } from './connect.js';
 import { alignSplitter } from './keys.js';
+import { termPalette, resolvedTheme, onThemeChange } from './theme.js';
 
 /* ------------------------------------------------------------------ */
 /* 内置 SSH 终端                                                       */
@@ -10,6 +11,7 @@ import { alignSplitter } from './keys.js';
 let termCtl = null;
 let pendingTerminal = false;
 let clipboardBound = false;
+let themeBound = false;
 
 /** 桌面版走主进程剪贴板（不依赖浏览器权限），网页版退回 navigator.clipboard。
  *  读不到返回 null（和「剪贴板是空的」区分开）。 */
@@ -212,28 +214,7 @@ function openTerminal() {
     lineHeight: 1.2,
     fontFamily: '"Cascadia Mono", Consolas, "Courier New", monospace',
     scrollback: 8000,
-    theme: {
-      background: '#131920',
-      foreground: '#d7e0ea',
-      cursor: '#4c8dff',
-      selectionBackground: '#26436b',
-      black: '#1a1f26',
-      red: '#f85149',
-      green: '#3fb950',
-      yellow: '#d6a034',
-      blue: '#4c8dff',
-      magenta: '#bc8cff',
-      cyan: '#39c5cf',
-      white: '#c9d1d9',
-      brightBlack: '#5c6773',
-      brightRed: '#ff7b72',
-      brightGreen: '#56d364',
-      brightYellow: '#e3b341',
-      brightBlue: '#79b8ff',
-      brightMagenta: '#d2a8ff',
-      brightCyan: '#56d4dd',
-      brightWhite: '#f0f6fc',
-    },
+    theme: termPalette(resolvedTheme()),
   });
   const fit = new window.FitAddon.FitAddon();
   term.loadAddon(fit);
@@ -315,6 +296,14 @@ function openTerminal() {
   window.addEventListener('resize', onWinResize);
 
   termCtl = { term, fit, ws, onWinResize, sendResize };
+
+  // 换主题时终端跟着换（xterm 不认 CSS 变量，只能整表替换）
+  if (!themeBound) {
+    themeBound = true;
+    onThemeChange((id) => {
+      if (termCtl) termCtl.term.options.theme = termPalette(id);
+    });
+  }
 }
 
 /** 收起：只隐藏，shell 与终端实例保留，再点「终端」立刻回来 */

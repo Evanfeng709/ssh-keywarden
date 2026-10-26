@@ -636,7 +636,7 @@ function renderServer() {
         <td><span class="badge bad">无法解析</span></td>
         <td></td>
         <td></td>
-        <td colspan="3" style="font-family:var(--mono);font-size:11.5px;color:#c99">
+        <td colspan="3" style="font-family:var(--mono);font-size:11.5px;color:var(--danger-text)">
           ${escapeHtml(item.reason || '格式异常')}
         </td>`;
       body.appendChild(tr);
@@ -730,6 +730,10 @@ function updateSelectionUi() {
   $('selCount').textContent = String(n);
   $('selCount').classList.toggle('hidden', n === 0);
   $('btnDelete').disabled = !state.session || n === 0;
+  // 只有真的选中有东西时才把删除按钮染红，平时保持中性
+  $('btnDelete').classList.toggle('is-danger', n > 0);
+  if (n > 0) $('btnDelete').title = `删除选中的 ${n} 把密钥`;
+  else $('btnDelete').title = '删除选中的密钥';
   const all = document.querySelectorAll('#keyBody input[type="checkbox"]');
   const checked = document.querySelectorAll('#keyBody input[type="checkbox"]:checked');
   const ca = $('checkAll');

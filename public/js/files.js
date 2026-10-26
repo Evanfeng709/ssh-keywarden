@@ -154,7 +154,7 @@ function openFilePicker(opts) {
           renderQuick(data);
           renderList(data);
         } catch (e) {
-          listEl.innerHTML = `<div class="none" style="color:#ff9b95">${escapeHtml(e.message)}</div>`;
+          listEl.innerHTML = `<div class="none" style="color:var(--danger-text)">${escapeHtml(e.message)}</div>`;
         }
       }
 

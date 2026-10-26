@@ -4,7 +4,7 @@
  * 渲染进程无 Node、无导航，所有本机文件操作走 IPC。
  */
 
-const { app, BrowserWindow, Menu, dialog, ipcMain, session, shell, clipboard } = require('electron');
+const { app, BrowserWindow, Menu, dialog, ipcMain, session, shell, clipboard, nativeTheme } = require('electron');
 const fs = require('fs');
 const path = require('path');
 const { ensureDataDir, migrateData } = require('./data-dir');
@@ -95,6 +95,13 @@ function registerIpc() {
   ipcMain.handle('kw:read-clipboard', () => clipboard.readText());
   ipcMain.handle('kw:write-clipboard', (_event, text) => {
     clipboard.writeText(String(text == null ? '' : text));
+  });
+
+  // 「跟随系统」主题：和系统设置里的深浅色同步
+  ipcMain.handle('kw:system-theme', () => nativeTheme.shouldUseDarkColors);
+  nativeTheme.on('updated', () => {
+    if (!mainWindow || mainWindow.isDestroyed()) return;
+    mainWindow.webContents.send('kw:system-theme-changed', nativeTheme.shouldUseDarkColors);
   });
 }
 

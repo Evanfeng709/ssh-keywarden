@@ -14,6 +14,7 @@ import { doConnect, refreshSession, disconnect, handleSessionLost } from './conn
 import { openAddModal, askDelete } from './actions.js';
 import { openBackupsModal } from './backups.js';
 import { toggleSshdFromBadge } from './sshd.js';
+import { initSystemTheme } from './theme.js';
 import {
   openTerminal,
   hideTerminal,
@@ -174,6 +175,7 @@ function bind() {
 }
 
 async function boot() {
+  initSystemTheme();
   setSessionLostHandler(handleSessionLost);
   bind();
   initTermHeight();
