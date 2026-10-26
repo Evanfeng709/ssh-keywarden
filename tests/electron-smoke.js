@@ -90,7 +90,13 @@ async function main() {
   const env = { ...process.env, KW_DATA_DIR: tmp, ELECTRON_RUN_AS_NODE: '' };
   delete env.ELECTRON_RUN_AS_NODE;
 
-  const args = [`--remote-debugging-port=${debugPort}`, '--disable-gpu'];
+  // 独立 user-data-dir：单实例锁按 userData 划分，避免和用户正在运行的已安装版互相踢
+  const userDataDir = path.join(tmp, 'userdata');
+  const args = [
+    `--remote-debugging-port=${debugPort}`,
+    `--user-data-dir=${userDataDir}`,
+    '--disable-gpu',
+  ];
   if (!APP_EXE) args.unshift('.');
   const child = spawn(ELECTRON, args, {
     cwd: ROOT,
@@ -134,6 +140,7 @@ async function main() {
         hasPickFile: typeof (window.keywarden && window.keywarden.pickFile) === 'function',
         hasPickDir: typeof (window.keywarden && window.keywarden.pickDir) === 'function',
         topbar: !!document.querySelector('.topbar'),
+        clipboardType: await window.keywarden.readClipboard().then((t) => typeof t),
         apiStatus: await fetch('/api/state').then((r) => r.status),
         apiOk: await fetch('/api/state').then((r) => r.json()).then((j) => j.ok === true)
       }))()`,
@@ -145,6 +152,125 @@ async function main() {
       throw new Error(`页面脚本异常：${result.exceptionDetails.text}`);
     }
     const value = result.result.value;
+
+    // 布局：单行顶栏、自绘窗口按钮、本地面板默认收起且可开关
+    const layoutResult = await send('Runtime.evaluate', {
+      expression: `(async () => {
+        const nextFrame = () => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+        // 版本号是 boot() 读完 /api/state 才写入的，等到它说明事件绑定已完成
+        for (let i = 0; i < 100 && document.getElementById('version').textContent === 'v—'; i++) {
+          await new Promise((r) => setTimeout(r, 100));
+        }
+        const panel = document.getElementById('localPanel');
+        const btnLocal = document.getElementById('btnLocal');
+        const layout = document.getElementById('layout');
+        const hiddenByDefault = getComputedStyle(panel).display === 'none';
+        btnLocal.click();
+        await nextFrame();
+        const shown = getComputedStyle(panel).display !== 'none' && layout.classList.contains('local-open');
+        const pressed = btnLocal.getAttribute('aria-pressed') === 'true';
+        btnLocal.click();
+        await nextFrame();
+        const hiddenAgain = getComputedStyle(panel).display === 'none';
+        const wc = window.keywarden && window.keywarden.windowControls;
+        return {
+          bodyDesktop: document.body.classList.contains('desktop'),
+          topbarHeight: Math.round(document.querySelector('.topbar').getBoundingClientRect().height),
+          hasWinButtons: ['winMin', 'winMax', 'winClose'].every((id) => {
+            const el = document.getElementById(id);
+            return !!el && el.offsetParent !== null;
+          }),
+          hasWindowControls:
+            !!wc &&
+            typeof wc.minimize === 'function' &&
+            typeof wc.toggleMaximize === 'function' &&
+            typeof wc.close === 'function',
+          hasClipboard:
+            typeof window.keywarden.readClipboard === 'function' &&
+            typeof window.keywarden.writeClipboard === 'function',
+          hasTermClipboardButtons: !!document.getElementById('termCopy') && !!document.getElementById('termPaste'),
+          hiddenByDefault,
+          shown,
+          pressed,
+          hiddenAgain
+        };
+      })()`,
+      awaitPromise: true,
+      returnByValue: true,
+    });
+    const layout = layoutResult.result.value;
+
+    // 终端粘贴：用假 WebSocket 截获发往 PTY 的字节，验证 paste 事件真的送达。
+    // 不读写系统剪贴板，避免动到用户正在用的内容。
+    const pasteResult = await send('Runtime.evaluate', {
+      expression: `(async () => {
+        const core = await import('/js/core.js');
+        const sent = [];
+        const RealWS = window.WebSocket;
+        window.WebSocket = class {
+          constructor() {
+            this.readyState = 1;
+            setTimeout(() => this.onopen && this.onopen(), 0);
+          }
+          send(d) {
+            sent.push(d);
+          }
+          close() {}
+        };
+        core.state.session = {
+          sid: 'fake',
+          host: { host: 'fake', username: 'fake' },
+          server: {},
+          remotePath: '',
+          stats: { total: 0 }
+        };
+        const term = await import('/js/terminal.js');
+        term.openTerminal();
+        await new Promise((r) => setTimeout(r, 400));
+
+        const body = document.getElementById('termBody');
+        const dt = new DataTransfer();
+        dt.setData('text/plain', 'event-paste');
+        body.dispatchEvent(new ClipboardEvent('paste', { clipboardData: dt, bubbles: true, cancelable: true }));
+        await new Promise((r) => setTimeout(r, 200));
+
+        const decoded = sent
+          .map((raw) => {
+            try {
+              const m = JSON.parse(raw);
+              return m.t === 'in' ? atob(m.d) : '';
+            } catch {
+              return '';
+            }
+          })
+          .join('');
+        term.destroyTerminal();
+        core.state.session = null;
+        window.WebSocket = RealWS;
+        return { received: decoded };
+      })()`,
+      awaitPromise: true,
+      returnByValue: true,
+    });
+    const paste = pasteResult.result.value;
+
+    // 自绘最大化按钮：连点两次应经历 最大化 → 还原，且 body 状态跟着变
+    const waitMaxClass = async (want, tries = 30) => {
+      for (let i = 0; i < tries; i++) {
+        const r = await send('Runtime.evaluate', {
+          expression: `document.body.classList.contains('maximized')`,
+          returnByValue: true,
+        });
+        if (r.result.value === want) return true;
+        await new Promise((res) => setTimeout(res, 100));
+      }
+      return false;
+    };
+    await send('Runtime.evaluate', { expression: `window.keywarden.windowControls.toggleMaximize()` });
+    const maximized = await waitMaxClass(true);
+    await send('Runtime.evaluate', { expression: `window.keywarden.windowControls.toggleMaximize()` });
+    const restored = await waitMaxClass(false);
+
 
     // 打开设置弹窗，确认桌面专属入口已渲染（不点，避免真的弹出资源管理器）。
     // 页面初始化是异步的，按钮监听可能晚于首次点击，这里重试到弹窗出现。
@@ -177,6 +303,18 @@ async function main() {
       ['接口返回 ok', value.apiOk === true],
       ['设置弹窗含密钥库目录', settings.hasKeydir === true],
       ['桌面版设置含「打开数据目录」', settings.hasOpenData === true],
+      ['顶栏标记为桌面版（无边框拖拽）', layout.bodyDesktop === true],
+      ['顶栏保持单行高度', layout.topbarHeight > 0 && layout.topbarHeight <= 52],
+      ['顶栏含最小化/最大化/关闭按钮', layout.hasWinButtons === true],
+      ['窗口控制桥接存在', layout.hasWindowControls === true],
+      ['剪贴板桥接存在', layout.hasClipboard === true],
+      ['剪贴板读取 IPC 可用', value.clipboardType === 'string'],
+      ['终端含复制/粘贴按钮', layout.hasTermClipboardButtons === true],
+      ['本地密钥库默认收起', layout.hiddenByDefault === true],
+      ['点本地按钮后从右侧展开', layout.shown === true && layout.pressed === true],
+      ['再点一次收起', layout.hiddenAgain === true],
+      ['终端粘贴事件能送达 PTY', paste.received === 'event-paste'],
+      ['最大化/还原切换生效', maximized === true && restored === true],
     ];
 
     let failed = 0;
@@ -186,6 +324,7 @@ async function main() {
     }
     if (failed) {
       console.error('设置弹窗诊断：', JSON.stringify(settings));
+      console.error('布局诊断：', JSON.stringify(layout));
       if (pageErrors.length) console.error('页面错误：\n' + pageErrors.join('\n'));
       throw new Error(`${failed} 项桌面冒烟检查失败`);
     }
@@ -201,7 +340,12 @@ async function main() {
         child.kill();
       } catch {}
     }
-    fs.rmSync(tmp, { recursive: true, force: true });
+    // Chromium 退出后还会短暂占着 user-data-dir，删不掉就多等几轮，别让清理失败冒充测试失败
+    try {
+      fs.rmSync(tmp, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 });
+    } catch {
+      console.warn(`  ! 临时目录未能删除，可手动清理：${tmp}`);
+    }
   }
 }
 

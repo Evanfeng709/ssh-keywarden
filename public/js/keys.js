@@ -222,7 +222,7 @@ function renderLocal() {
     hint.className = 'ehint';
     if (!entries.length) {
       title.textContent = dir ? '这个目录里没找到密钥文件' : '请先在设置里指定本地密钥目录';
-      hint.textContent = dir ? '支持递归扫描私钥与 .pub 公钥' : '点右上角 📁 选择目录后会重新扫描';
+      hint.textContent = dir ? '支持递归扫描私钥与 .pub 公钥' : '点右上角「设置」选择目录后会重新扫描';
       li.append(title, hint);
     } else {
       title.textContent = '没有匹配的密钥';
@@ -291,8 +291,6 @@ function isLoginKey(entry, identityFile) {
 /* ------------------------------------------------------------------ */
 
 function setConnected(connected) {
-  const dot = $('connState');
-  dot.className = `state-dot${connected ? ' on' : ''}`;
   $('btnRefresh').disabled = !connected;
   $('btnBackups').disabled = !connected;
   $('btnAdd').disabled = !connected;

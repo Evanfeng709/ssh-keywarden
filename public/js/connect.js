@@ -19,8 +19,6 @@ async function doConnect(hostId, extra = {}) {
     destroyTerminal(); // 换了服务器，旧终端必须关掉
     state.session = data;
     state.selected.clear();
-    $('connState').className = 'state-dot on';
-    $('connState').title = '已连接';
     renderServer();
     logLine(
       `已连接 ${data.host.username}@${data.host.host}（${data.server.uname || '未知系统'}）· ${data.remotePath} · 共 ${data.stats.total} 把钥匙`,
@@ -35,7 +33,6 @@ async function doConnect(hostId, extra = {}) {
     }
     return true;
   } catch (e) {
-    $('connState').className = 'state-dot err';
     if (e.code === 'HOSTKEY_UNKNOWN' || e.code === 'HOSTKEY_CHANGED') {
       logLine(`主机指纹待确认：${e.details ? `${e.details.host}:${e.details.port}` : e.message}`, 'warn');
       openHostKeyModal(e, hostId, extra);
@@ -183,8 +180,5 @@ function handleSessionLost() {
   const hint = empty.querySelector('.hint');
   if (p) p.textContent = '连接已断开';
   if (hint) hint.textContent = '服务器主动断开了连接（常见于空闲超时）。点右上角「连接」重新连上即可。';
-
-  $('connState').className = 'state-dot err';
-  $('connState').title = '连接已断开';
 }
 export { doConnect, openHostKeyModal, openCredModal, refreshSession, disconnect, handleSessionLost };

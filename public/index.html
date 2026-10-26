@@ -8,24 +8,57 @@
 <link rel="stylesheet" href="/style.css" />
 </head>
 <body>
-<header class="topbar">
+<header class="topbar" id="topbar">
   <div class="brand">
-    <span class="logo">🔐</span>
+    <span class="logo" aria-hidden="true">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="8.5" cy="8.5" r="4.5"/><path d="M11.7 11.7 20 20"/><path d="M17 17l2-2"/><path d="M19 19l2-2"/></svg>
+    </span>
     <span class="title">SSH Keywarden</span>
     <span class="ver" id="version">v—</span>
   </div>
 
-  <div class="conn">
+  <div class="top-right">
     <select id="hostSelect" title="选择主机"></select>
-    <button id="btnConnect" class="primary">连接</button>
-    <button id="btnTerm" class="ghost dim" title="先连接服务器才能开终端">终端</button>
-    <button id="btnHosts" class="icon-btn" title="管理主机">⚙</button>
-    <button id="btnSettings" class="icon-btn" title="设置">📁</button>
-    <span id="connState" class="state-dot" title="未连接"></span>
+
+    <button id="btnLocal" class="square-btn" title="显示本地密钥库" aria-label="本地密钥库" aria-pressed="false" aria-controls="localPanel">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M15 4v16"/></svg>
+    </button>
+
+    <div class="action-group" role="group" aria-label="主操作">
+      <button id="btnConnect" class="tool-btn primary" title="连接所选主机">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 7V3M15 7V3"/><path d="M6 7h12v4a6 6 0 0 1-12 0z"/><path d="M12 17v4"/></svg>
+        <span class="lbl">连接</span>
+      </button>
+      <button id="btnTerm" class="tool-btn dim" title="先连接服务器才能开终端">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="m7 9 3 3-3 3"/><path d="M13 15h4"/></svg>
+        <span class="lbl">终端</span>
+      </button>
+      <button id="btnHosts" class="tool-btn" title="管理主机">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="6.5" rx="2"/><rect x="3" y="13.5" width="18" height="6.5" rx="2"/><path d="M7 7.25h.01M7 16.75h.01"/></svg>
+        <span class="lbl">管理主机</span>
+      </button>
+      <button id="btnSettings" class="tool-btn" title="设置">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 7h8M16 7h4M4 12h3M11 12h9M4 17h10M18 17h2"/><circle cx="14" cy="7" r="2"/><circle cx="9" cy="12" r="2"/><circle cx="16" cy="17" r="2"/></svg>
+        <span class="lbl">设置</span>
+      </button>
+    </div>
+
+    <div class="win-controls" id="winControls">
+      <button id="winMin" class="win-btn" title="最小化" aria-label="最小化">
+        <svg viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1"><path d="M2 5h6"/></svg>
+      </button>
+      <button id="winMax" class="win-btn" title="最大化" aria-label="最大化">
+        <svg class="ico-max" viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1"><rect x="2.5" y="2.5" width="5" height="5"/></svg>
+        <svg class="ico-restore" viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1"><rect x="2" y="3.5" width="4.8" height="4.8"/><path d="M3.7 3.5V2h4.8v4.8H7"/></svg>
+      </button>
+      <button id="winClose" class="win-btn close" title="关闭" aria-label="关闭">
+        <svg viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1.1"><path d="M2 2l6 6M8 2 2 8"/></svg>
+      </button>
+    </div>
   </div>
 </header>
 
-<main class="layout">
+<main class="layout" id="layout">
   <section class="panel server-panel">
     <div class="panel-head">
       <div class="head-left">
@@ -78,7 +111,7 @@
       <div class="empty" id="emptyState">
         <div class="empty-icon">🗝️</div>
         <p>还没有连接服务器</p>
-        <p class="hint">先在右上角选择（或新建）一台主机，点「连接」查看它允许哪些钥匙登录。</p>
+        <p class="hint">先在右上角选一台主机（没有就点「管理主机」新建）。<br />连接后这里会列出服务器允许登录的所有钥匙。</p>
       </div>
     </div>
 
@@ -89,6 +122,8 @@
         <span class="term-title"><i id="termDot" class="term-dot" title="未连接"></i>终端</span>
         <span class="term-status hidden" id="termStatus"></span>
         <span style="flex:1"></span>
+        <button id="termCopy" class="link-btn" title="复制选中内容（Ctrl+Shift+C）">复制</button>
+        <button id="termPaste" class="link-btn" title="粘贴剪贴板内容（Ctrl+V）">粘贴</button>
         <button id="termClear" class="link-btn">清屏</button>
         <button id="termClose" class="icon-btn" title="收起终端（会话保留）">✕</button>
       </div>
@@ -96,7 +131,7 @@
     </div>
   </section>
 
-  <aside class="panel local-panel">
+  <aside class="panel local-panel" id="localPanel">
     <div class="local-head">
       <div class="local-title-row">
         <h2>本地密钥库</h2>

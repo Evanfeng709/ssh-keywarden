@@ -9,6 +9,95 @@ import { alignSplitter } from './keys.js';
 
 let termCtl = null;
 let pendingTerminal = false;
+let clipboardBound = false;
+
+/** 桌面版走主进程剪贴板（不依赖浏览器权限），网页版退回 navigator.clipboard。
+ *  读不到返回 null（和「剪贴板是空的」区分开）。 */
+async function readClipboardText() {
+  const kw = window.keywarden;
+  if (kw && typeof kw.readClipboard === 'function') {
+    try {
+      return (await kw.readClipboard()) || '';
+    } catch {
+      /* 落到下面的网页通道 */
+    }
+  }
+  try {
+    return (await navigator.clipboard.readText()) || '';
+  } catch {
+    return null;
+  }
+}
+
+async function writeClipboardText(text) {
+  const kw = window.keywarden;
+  if (kw && typeof kw.writeClipboard === 'function') {
+    try {
+      await kw.writeClipboard(text);
+      return true;
+    } catch {
+      /* 落到下面的网页通道 */
+    }
+  }
+  try {
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function pasteIntoTerminal(term) {
+  const text = await readClipboardText();
+  if (text == null) {
+    toast('读不到剪贴板内容，试试直接按 Ctrl+V', 'warn', 2400);
+    return;
+  }
+  if (!text) {
+    toast('剪贴板是空的', 'warn', 1800);
+    return;
+  }
+  term.paste(text);
+  term.focus();
+}
+
+async function copySelection(term) {
+  const sel = term.getSelection();
+  if (!sel) {
+    toast('先选中要复制的内容', 'warn', 1800);
+    return;
+  }
+  const ok = await writeClipboardText(sel);
+  toast(ok ? '已复制选中内容' : '复制失败', ok ? 'ok' : 'err', 1600);
+  term.focus();
+}
+
+/** 终端始终在位，粘贴/复制入口只绑一次 */
+function bindClipboardUi() {
+  if (clipboardBound) return;
+  clipboardBound = true;
+
+  // 浏览器原生粘贴（Ctrl+V / 右键粘贴）时，别让 xterm 的 textarea 自己吞掉
+  $('termBody').addEventListener(
+    'paste',
+    (e) => {
+      if (!termCtl) return;
+      const text = e.clipboardData ? e.clipboardData.getData('text') : '';
+      if (!text) return;
+      e.preventDefault();
+      e.stopPropagation();
+      termCtl.term.paste(text);
+    },
+    true
+  );
+
+  $('termCopy').addEventListener('click', () => {
+    if (termCtl) copySelection(termCtl.term);
+  });
+  $('termPaste').addEventListener('click', () => {
+    if (termCtl) pasteIntoTerminal(termCtl.term);
+  });
+}
 
 /** 终端默认高度：窗口的 42%，用户拖动过就记住 */
 export const TERM_HEIGHT_KEY = 'kw.termHeight';
@@ -114,6 +203,7 @@ function openTerminal() {
   }
 
   setTermStatus('连接中…', 'warn');
+  bindClipboardUi();
 
   const term = new window.Terminal({
     cursorBlink: true,
@@ -149,6 +239,27 @@ function openTerminal() {
   term.loadAddon(fit);
   term.open($('termBody'));
   fit.fit();
+  term.focus();
+
+  // Ctrl+V / Ctrl+Shift+V / Shift+Insert 粘贴，Ctrl+Shift+C 复制；
+  // Ctrl+C 保持原样（有选中内容时 xterm 自己会复制，没有就是 SIGINT）
+  term.attachCustomKeyEventHandler((e) => {
+    if (e.type !== 'keydown') return true;
+    const ctrl = e.ctrlKey || e.metaKey;
+    if (ctrl && e.shiftKey && (e.key === 'C' || e.key === 'c')) {
+      copySelection(term);
+      return false;
+    }
+    if (ctrl && (e.key === 'v' || e.key === 'V')) {
+      pasteIntoTerminal(term);
+      return false;
+    }
+    if (e.shiftKey && e.key === 'Insert') {
+      pasteIntoTerminal(term);
+      return false;
+    }
+    return true;
+  });
 
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
   const qs = `sid=${encodeURIComponent(state.session.sid)}&cols=${term.cols}&rows=${term.rows}`;

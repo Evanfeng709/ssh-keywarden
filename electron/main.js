@@ -4,7 +4,7 @@
  * 渲染进程无 Node、无导航，所有本机文件操作走 IPC。
  */
 
-const { app, BrowserWindow, Menu, dialog, ipcMain, session, shell } = require('electron');
+const { app, BrowserWindow, Menu, dialog, ipcMain, session, shell, clipboard } = require('electron');
 const fs = require('fs');
 const path = require('path');
 const { ensureDataDir, migrateData } = require('./data-dir');
@@ -76,6 +76,26 @@ function registerIpc() {
     const err = await shell.openPath(appDataDir);
     return err || '';
   });
+
+  // 无边框窗口：顶栏里的最小化 / 最大化 / 关闭
+  ipcMain.on('kw:win-minimize', () => {
+    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.minimize();
+  });
+  ipcMain.on('kw:win-toggle-maximize', () => {
+    if (!mainWindow || mainWindow.isDestroyed()) return;
+    if (mainWindow.isMaximized()) mainWindow.unmaximize();
+    else mainWindow.maximize();
+  });
+  ipcMain.on('kw:win-close', () => {
+    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.close();
+  });
+  ipcMain.handle('kw:win-is-maximized', () => Boolean(mainWindow && !mainWindow.isDestroyed() && mainWindow.isMaximized()));
+
+  // 终端粘贴：主进程剪贴板不受网页权限限制
+  ipcMain.handle('kw:read-clipboard', () => clipboard.readText());
+  ipcMain.handle('kw:write-clipboard', (_event, text) => {
+    clipboard.writeText(String(text == null ? '' : text));
+  });
 }
 
 function hardenWebContents(win) {
@@ -107,6 +127,7 @@ function createWindow() {
     ...state,
     minWidth: 1024,
     minHeight: 680,
+    frame: false,
     show: false,
     backgroundColor: '#0d1117',
     title: 'SSH Keywarden',
@@ -124,6 +145,12 @@ function createWindow() {
   hardenWebContents(mainWindow);
   mainWindow.once('ready-to-show', () => mainWindow.show());
   mainWindow.on('close', saveWindowState);
+  const sendMaxState = () => {
+    if (!mainWindow || mainWindow.isDestroyed()) return;
+    mainWindow.webContents.send('kw:win-max-changed', mainWindow.isMaximized());
+  };
+  mainWindow.on('maximize', sendMaxState);
+  mainWindow.on('unmaximize', sendMaxState);
   mainWindow.on('closed', () => {
     mainWindow = null;
   });

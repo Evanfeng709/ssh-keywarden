@@ -15,7 +15,7 @@ function renderHosts() {
   if (!state.hosts.length) {
     const opt = document.createElement('option');
     opt.value = '';
-    opt.textContent = '（还没有主机，点 ⚙ 添加）';
+    opt.textContent = '（还没有主机，点「管理主机」添加）';
     sel.appendChild(opt);
     return;
   }

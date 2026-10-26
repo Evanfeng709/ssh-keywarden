@@ -28,11 +28,55 @@ import {
 /* 事件绑定 + 启动                                                     */
 /* ------------------------------------------------------------------ */
 
+function setLocalPanel(open) {
+  $('layout').classList.toggle('local-open', open);
+  $('btnLocal').setAttribute('aria-pressed', String(open));
+  $('btnLocal').title = open ? '收起本地密钥库' : '显示本地密钥库';
+  if (open) renderLocal();
+  // 主区域变窄，终端列数要跟着重排
+  requestAnimationFrame(() => {
+    alignSplitter();
+    const ctl = getTermCtl();
+    if (ctl) {
+      ctl.fit.fit();
+      ctl.sendResize();
+    }
+  });
+}
+
+/** 桌面版：无边框窗口靠顶栏里的自绘按钮操作 */
+function bindWindowControls() {
+  if (!window.keywarden || !window.keywarden.isDesktop) return;
+  document.body.classList.add('desktop');
+
+  const wc = window.keywarden.windowControls;
+  if (!wc) return;
+
+  $('winMin').addEventListener('click', () => wc.minimize());
+  $('winMax').addEventListener('click', () => wc.toggleMaximize());
+  $('winClose').addEventListener('click', () => wc.close());
+
+  const apply = (v) => {
+    const max = Boolean(v);
+    document.body.classList.toggle('maximized', max);
+    $('winMax').title = max ? '还原' : '最大化';
+    $('winMax').setAttribute('aria-label', max ? '还原' : '最大化');
+  };
+  wc.isMaximized().then(apply).catch(() => {});
+  wc.onMaximizeChange(apply);
+}
+
 function bind() {
+  bindWindowControls();
+
   $('btnConnect').addEventListener('click', () => {
     const id = $('hostSelect').value;
     if (!id) return openHostModal();
     doConnect(id);
+  });
+
+  $('btnLocal').addEventListener('click', () => {
+    setLocalPanel(!$('layout').classList.contains('local-open'));
   });
 
   $('btnHosts').addEventListener('click', () => {
@@ -152,7 +196,7 @@ async function boot() {
     renderServer();
 
     if (!s.hosts.length) {
-      logLine('还没有配置主机。点右上角 ⚙ 添加一台，或用「连接」按钮直接填。', 'info');
+      logLine('还没有配置主机。点右上角「管理主机」添加一台，或用「连接」按钮直接填。', 'info');
     } else {
       logLine(`已加载 ${s.hosts.length} 台主机配置，本地密钥库 ${s.localKeys.entries.length} 个文件`, 'info');
     }
