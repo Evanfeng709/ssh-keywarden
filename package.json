@@ -1,6 +1,6 @@
 {
   "name": "ssh-keywarden",
-  "version": "2026.10.28-1",
+  "version": "2026.10.28-2",
   "private": true,
   "description": "本地 SSH 授权密钥管理台：查看 / 新增 / 更换 / 清理服务器 authorized_keys",
   "author": "Evanfeng709",
