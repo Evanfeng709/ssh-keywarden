@@ -55,8 +55,8 @@ npm start        # → http://127.0.0.1:7791
 
 - **窗口**：无边框单行顶栏，最小化 / 最大化 / 关闭自绘在右上角；空白处拖动窗口，双击最大化。
 - **布局**：本地密钥库默认收起，点顶栏按钮从右侧展开（窄窗口为浮层抽屉），不再长期占用主界面宽度。
-- **外观**：主题选择存在本机 `localStorage`，首帧内联脚本读取后直接落到 `<html data-theme>`，换主题不闪白；「跟随系统」由主进程 `nativeTheme` 推送深浅色变化（浏览器模式退回 `prefers-color-scheme`）。
-- **数据目录**：`%APPDATA%\ssh-keywarden\data`（`config.json` / `known_hosts.json` / `key-notes.json`）。首次启动若安装目录旁存在旧的 `data/`，会自动迁移；也可用 `KW_DATA_DIR` 指定别处。
+- **外观**：主题选择由主进程存在数据目录的 `theme.json`（桌面版每次启动端口不同，`localStorage` 按 origin 隔离会丢），首帧通过预加载桥接同步读取后直接落到 `<html data-theme>`，换主题不闪白；「跟随系统」由主进程 `nativeTheme` 推送深浅色变化（浏览器模式退回 `localStorage` + `prefers-color-scheme`）。
+- **数据目录**：`%APPDATA%\ssh-keywarden\data`（`config.json` / `known_hosts.json` / `key-notes.json` / `theme.json` / `window-state.json`）。首次启动若安装目录旁存在旧的 `data/`，会自动迁移；也可用 `KW_DATA_DIR` 指定别处。
 - **会话边界**：服务仍只监听 `127.0.0.1`，但改用随机端口，并**关闭「访问首页即发 Cookie」**；令牌由主进程直接写进 Electron 会话，本机其他进程扫到端口也拿不到会话。
 - **渲染进程**：关闭 Node、启用沙箱；「浏览…」走系统文件对话框，支持 OneDrive 占位符路径与带空格的目录。
 - **密钥库**：扫描结果缓存 60 秒，点「重新扫描」强制刷新。OneDrive 目录建议设为「始终保留在此设备上」，否则首次扫描会触发占位符下载。
@@ -127,7 +127,7 @@ npm test
 - 端到端测试在本机起一个真实 SSH 服务端（内存文件系统），把「查看 → 新增 → 重复新增 → 粘贴垃圾 → 更换 → 删除 → 防锁死 → 备注 → 备份列表 / 差异 / 恢复」全跑一遍，断言文件内容与备份；
 - 桌面模式测试覆盖随机端口、关闭自动发 Cookie、Host 校验与扫描缓存；
 - `npm test` 里另带主题测试：6 套主题令牌齐全、组件区无硬编码颜色、17 组对比度逐主题达标、按钮规格与系统深浅色通道；
-- `npm run test:app` 启动真实 Electron 窗口做冒烟（Windows），检查桌面桥接、页面渲染、Cookie 注入、单行顶栏、窗口按钮最大化/还原、本地面板开关、主题预览/回滚/保存与终端粘贴；打包后可加 `KW_APP_EXE=dist/win-unpacked/"SSH Keywarden.exe"` 复跑同一套检查。
+- `npm run test:app` 启动真实 Electron 窗口做冒烟（Windows），检查桌面桥接、页面渲染、Cookie 注入、单行顶栏、窗口按钮最大化/还原、本地面板开关、主题预览/回滚/保存与重启保持、终端粘贴；打包后可加 `KW_APP_EXE=dist/win-unpacked/"SSH Keywarden.exe"` 复跑同一套检查。
 
 指纹算法已与 `ssh-keygen -lf` 逐一比对一致；生成的私钥可直接被 `ssh-keygen -y` 解析。
 
