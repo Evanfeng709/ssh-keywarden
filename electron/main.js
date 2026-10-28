@@ -32,6 +32,31 @@ function resolveAppDataDir() {
   };
 }
 
+/**
+ * 主题记在数据目录里，不依赖 localStorage：桌面版每次启动都是随机端口，
+ * origin 一变 localStorage 就是空的，用户的主题选择会跟着丢。
+ */
+const THEME_CHOICES = new Set(['obsidian', 'midnight', 'graphite', 'cloud', 'linen', 'mist', 'auto', 'auto-soft']);
+let themeChoice = '';
+
+function loadThemeChoice() {
+  try {
+    const raw = JSON.parse(fs.readFileSync(path.join(appDataDir, 'theme.json'), 'utf8'));
+    if (raw && THEME_CHOICES.has(raw.choice)) return raw.choice;
+  } catch {
+    /* 没选过或文件损坏就用默认 */
+  }
+  return '';
+}
+
+function saveThemeChoice(choice) {
+  try {
+    fs.writeFileSync(path.join(appDataDir, 'theme.json'), JSON.stringify({ choice }), 'utf8');
+  } catch {
+    /* 存不下也只是这一轮不记住，不打断使用 */
+  }
+}
+
 function loadWindowState() {
   try {
     const raw = JSON.parse(fs.readFileSync(path.join(appDataDir, 'window-state.json'), 'utf8'));
@@ -103,6 +128,18 @@ function registerIpc() {
     if (!mainWindow || mainWindow.isDestroyed()) return;
     mainWindow.webContents.send('kw:system-theme-changed', nativeTheme.shouldUseDarkColors);
   });
+
+  // 首帧脚本要同步拿到主题，避免启动时先闪一帧默认深色
+  ipcMain.on('kw:theme-get', (event) => {
+    event.returnValue = themeChoice;
+  });
+  ipcMain.handle('kw:theme-set', (_event, choice) => {
+    if (THEME_CHOICES.has(choice)) {
+      themeChoice = choice;
+      saveThemeChoice(choice);
+    }
+    return themeChoice;
+  });
 }
 
 function hardenWebContents(win) {
@@ -169,6 +206,7 @@ function createWindow() {
 async function boot() {
   const resolved = resolveAppDataDir();
   appDataDir = ensureDataDir(resolved.dir);
+  themeChoice = loadThemeChoice();
 
   if (resolved.migrateFrom.length) {
     const migrated = migrateData(appDataDir, resolved.migrateFrom);

@@ -38,6 +38,14 @@ let choice = readChoice();
 let resolved = resolve(choice);
 
 function readChoice() {
+  /* 桌面版：主题由主进程落盘，localStorage 会随随机端口的 origin 变空 */
+  const bridge = typeof window !== 'undefined' && window.keywarden && window.keywarden.theme;
+  if (bridge) {
+    try {
+      const v = bridge.initial || bridge.get();
+      if (v && (IDS.has(v) || AUTOS.has(v))) return v;
+    } catch {}
+  }
   try {
     const v = localStorage.getItem(THEME_KEY);
     if (v && (IDS.has(v) || AUTOS.has(v))) return v;
@@ -86,6 +94,12 @@ export function applyTheme(next, { persist = true } = {}) {
     try {
       localStorage.setItem(THEME_KEY, choice);
     } catch {}
+    const bridge = typeof window !== 'undefined' && window.keywarden && window.keywarden.theme;
+    if (bridge) {
+      try {
+        bridge.set(choice);
+      } catch {}
+    }
   }
   resolved = resolve(choice);
   emit();

@@ -107,6 +107,8 @@ async function main() {
   let stderr = '';
   child.stderr.on('data', (d) => (stderr += d.toString()));
 
+  let restarted = null;
+
   try {
     const page = await waitForPage(debugPort);
     const ws = new WebSocket(page.webSocketDebuggerUrl);
@@ -139,6 +141,7 @@ async function main() {
         desktop: !!(window.keywarden && window.keywarden.isDesktop),
         hasPickFile: typeof (window.keywarden && window.keywarden.pickFile) === 'function',
         hasPickDir: typeof (window.keywarden && window.keywarden.pickDir) === 'function',
+        hasThemeBridge: !!(window.keywarden && window.keywarden.theme && typeof window.keywarden.theme.get === 'function'),
         topbar: !!document.querySelector('.topbar'),
         clipboardType: await window.keywarden.readClipboard().then((t) => typeof t),
         apiStatus: await fetch('/api/state').then((r) => r.status),
@@ -390,6 +393,7 @@ async function main() {
           return {
             applied: document.documentElement.dataset.theme,
             stored: localStorage.getItem('kw.theme'),
+            persisted: await window.keywarden.theme.get(),
             closed: document.querySelectorAll('.modal-mask').length === 0
           };
         })()`,
@@ -401,9 +405,64 @@ async function main() {
     }
     ws.close();
 
+    // 重启验证：同一数据目录再启动一次，端口变了（origin 变、localStorage 空），主题应从主进程记录恢复
+    let themeFile = '';
+    try {
+      themeFile = JSON.parse(fs.readFileSync(path.join(tmp, 'theme.json'), 'utf8')).choice;
+    } catch {}
+    // 单实例锁按 userData 划分，必须先关掉第一个进程再启动第二个
+    try {
+      execFileSync('taskkill', ['/PID', String(child.pid), '/T', '/F'], { stdio: 'ignore' });
+    } catch {}
+    await new Promise((r) => setTimeout(r, 500));
+    let restartState = { initial: '', stored: '', theme: '', port: '' };
+    for (let attempt = 0; attempt < 3 && !restartState.theme; attempt++) {
+      try {
+        if (restarted) {
+          try {
+            execFileSync('taskkill', ['/PID', String(restarted.pid), '/T', '/F'], { stdio: 'ignore' });
+          } catch {}
+        }
+        const restartPort = await freePort();
+        const restartArgs = [`--remote-debugging-port=${restartPort}`, `--user-data-dir=${userDataDir}`, '--disable-gpu'];
+        if (!APP_EXE) restartArgs.unshift('.');
+        restarted = spawn(ELECTRON, restartArgs, { cwd: ROOT, env, stdio: ['ignore', 'pipe', 'pipe'] });
+        restarted.stderr.on('data', () => {});
+        const page2 = await waitForPage(restartPort);
+        const ws2 = new WebSocket(page2.webSocketDebuggerUrl);
+        await new Promise((resolve, reject) => {
+          ws2.once('open', resolve);
+          ws2.once('error', reject);
+        });
+        const send2 = cdp(ws2);
+        const restartResult = await send2('Runtime.evaluate', {
+          expression: `(async () => {
+            const version = () => document.getElementById('version');
+            for (let i = 0; i < 100 && (!version() || version().textContent === 'v—'); i++) {
+              await new Promise((res) => setTimeout(res, 100));
+            }
+            return {
+              initial: window.keywarden.theme.initial,
+              stored: await window.keywarden.theme.get(),
+              theme: document.documentElement.dataset.theme,
+              port: location.port
+            };
+          })()`,
+          awaitPromise: true,
+          returnByValue: true,
+        });
+        ws2.close();
+        restartState = restartResult.result.value;
+      } catch (e) {
+        if (attempt === 2) throw e;
+        await new Promise((r) => setTimeout(r, 700));
+      }
+    }
+
     const checks = [
       ['窗口标题正确', value.title === 'SSH Keywarden'],
       ['桌面桥接已注入', value.desktop === true],
+      ['主题桥接已注入', value.hasThemeBridge === true],
       ['原生选文件接口存在', value.hasPickFile === true],
       ['原生选目录接口存在', value.hasPickDir === true],
       ['页面主界面已渲染', value.topbar === true],
@@ -417,6 +476,8 @@ async function main() {
       ['预览不写 localStorage', preview.storedLive === 'auto'],
       ['取消后主题回滚', preview.after === preview.before && preview.masks === 0],
       ['保存后主题被记住', saved.applied === 'mist' && saved.stored === 'mist' && saved.closed === true],
+      ['主题选择写入主进程存储', saved.persisted === 'mist' && themeFile === 'mist'],
+      ['重启后主题仍然生效', restartState.initial === 'mist' && restartState.stored === 'mist' && restartState.theme === 'mist'],
       ['手动主题立即生效', themeState.linen.applied === 'linen' && themeState.linen.stored === 'linen'],
       ['浅色主题背景即时换色', themeState.linen.bg === 'rgb(246, 242, 234)'],
       ['自动主题按系统解析', themeState.auto.applied === themeState.auto.expected && themeState.auto.stored === 'auto'],
@@ -446,6 +507,7 @@ async function main() {
     if (failed) {
       console.error('设置弹窗诊断：', JSON.stringify(settings));
       console.error('布局诊断：', JSON.stringify(layout));
+      console.error('重启诊断：', JSON.stringify({ themeFile, restartState }));
       if (pageErrors.length) console.error('页面错误：\n' + pageErrors.join('\n'));
       throw new Error(`${failed} 项桌面冒烟检查失败`);
     }
@@ -454,12 +516,15 @@ async function main() {
     if (stderr.trim()) console.error(stderr.slice(-2000));
     throw e;
   } finally {
-    try {
-      execFileSync('taskkill', ['/PID', String(child.pid), '/T', '/F'], { stdio: 'ignore' });
-    } catch {
+    for (const proc of [child, restarted]) {
+      if (!proc) continue;
       try {
-        child.kill();
-      } catch {}
+        execFileSync('taskkill', ['/PID', String(proc.pid), '/T', '/F'], { stdio: 'ignore' });
+      } catch {
+        try {
+          proc.kill();
+        } catch {}
+      }
     }
     // Chromium 退出后还会短暂占着 user-data-dir，删不掉就多等几轮，别让清理失败冒充测试失败
     try {

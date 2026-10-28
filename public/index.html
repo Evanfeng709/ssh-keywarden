@@ -11,6 +11,8 @@
     var known = ['obsidian', 'midnight', 'graphite', 'cloud', 'linen', 'mist'];
     var choice = 'obsidian';
     try { choice = localStorage.getItem('kw.theme') || 'obsidian'; } catch (e) {}
+    /* 桌面版每次启动端口都变，localStorage 是空的，主题以主进程记的为准 */
+    try { if (window.keywarden && window.keywarden.theme && window.keywarden.theme.initial) choice = window.keywarden.theme.initial; } catch (e) {}
     var dark = window.matchMedia ? matchMedia('(prefers-color-scheme: dark)').matches : true;
     var id = auto[choice] ? auto[choice][dark ? 0 : 1] : (known.indexOf(choice) >= 0 ? choice : 'obsidian');
     document.documentElement.dataset.theme = id;

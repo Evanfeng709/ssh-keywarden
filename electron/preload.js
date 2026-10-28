@@ -27,4 +27,10 @@ contextBridge.exposeInMainWorld('keywarden', {
       ipcRenderer.on('kw:system-theme-changed', (_event, dark) => cb(Boolean(dark)));
     },
   },
+  theme: {
+    /* 同步读取：首帧 <head> 脚本要用它定主题 */
+    initial: ipcRenderer.sendSync('kw:theme-get') || '',
+    get: () => ipcRenderer.sendSync('kw:theme-get') || '',
+    set: (choice) => ipcRenderer.invoke('kw:theme-set', choice),
+  },
 });

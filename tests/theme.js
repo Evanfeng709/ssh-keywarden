@@ -202,6 +202,17 @@ test('桌面版提供系统深浅色通道', () => {
   assert.match(PRELOAD, /kw:system-theme-changed/);
 });
 
+test('桌面版主题写进数据目录而不是 localStorage', () => {
+  assert.match(MAIN, /theme\.json/);
+  assert.match(MAIN, /ipcMain\.on\('kw:theme-get'/);
+  assert.match(MAIN, /ipcMain\.handle\('kw:theme-set'/);
+  assert.match(PRELOAD, /initial: ipcRenderer\.sendSync\('kw:theme-get'\)/);
+  assert.match(PRELOAD, /set: \(choice\) => ipcRenderer\.invoke\('kw:theme-set', choice\)/);
+  assert.match(THEME_JS, /window\.keywarden\.theme/);
+  assert.match(THEME_JS, /bridge\.set\(choice\)/);
+  assert.match(HTML, /window\.keywarden\.theme\.initial/);
+});
+
 test('终端按主题取色并能热切换', () => {
   const term = fs.readFileSync(path.join(ROOT, 'public', 'js', 'terminal.js'), 'utf8');
   assert.match(term, /termPalette\(resolvedTheme\(\)\)/);
