@@ -14,6 +14,8 @@ export const state = {
   session: null,
   selected: new Set(),
   sshd: null,
+  mode: 'keys',
+  connecting: false,
 };
 
 export function escapeHtml(s) {

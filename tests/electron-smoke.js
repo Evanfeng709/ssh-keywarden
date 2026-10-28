@@ -66,9 +66,435 @@ function cdp(ws) {
     });
 }
 
+// 函数在真实 renderer 中执行；结果只返回断言，不返回主机、会话或请求内容。
+async function evaluate(send, fn, ...args) {
+  const result = await send('Runtime.evaluate', {
+    expression: `(${fn.toString()})(${args.map((arg) => JSON.stringify(arg)).join(',')})`,
+    awaitPromise: true,
+    returnByValue: true,
+  });
+  if (result.exceptionDetails) throw new Error('回归页面脚本执行失败');
+  return result.result.value;
+}
+
+async function installUiFixture() {
+  const { state } = await import('/js/core.js');
+  const keys = await import('/js/keys.js');
+  const term = await import('/js/terminal.js');
+  const realFetch = window.fetch;
+  const RealWS = window.WebSocket;
+  const f = {
+    state, keys, term, requests: [], sockets: [], sent: [], refreshReply: null,
+    sshd: { available: true, state: 'key-only', keyOnly: true, pubkeyAuth: true, canWrite: false },
+    button: (mode) => document.querySelector('#modeSwitch button[data-mode="' + mode + '"]'),
+    visible: (selector) => {
+      const el = document.querySelector(selector);
+      return !!el && el.getClientRects().length > 0 && getComputedStyle(el).visibility !== 'hidden';
+    },
+    frames: async () => {
+      await document.fonts.ready;
+      for (let i = 0; i < 4; i++) await new Promise(requestAnimationFrame);
+    },
+    until: async (predicate) => {
+      const deadline = performance.now() + 4000;
+      while (!predicate() && performance.now() < deadline) await new Promise((r) => setTimeout(r, 20));
+      return !!predicate();
+    },
+    session: (count = 1) => ({
+      sid: 'smoke-ui-session', keysLoaded: true, fileExists: true, authMethod: 'key',
+      host: { id: 'smoke', host: 'smoke.invalid', username: 'smoke', port: 22, identityFile: '' },
+      server: { uname: 'Smoke OS' }, remotePath: '/smoke/.ssh/authorized_keys',
+      usedKeyFp: 'SHA256:' + '0'.repeat(4) + 'S'.repeat(39), stats: { total: count },
+      items: Array.from({ length: count }, (_, i) => ({
+        kind: 'key', type: 'ssh-ed25519', fingerprint: 'SHA256:' + String(i).padStart(4, '0') + 'S'.repeat(39),
+        comment: 'smoke-row-' + String(i).padStart(3, '0'), options: '',
+      })),
+    }),
+    holdRefresh: () => {
+      f.refreshReply = new Promise((resolve) => { f.releaseRefresh = resolve; });
+    },
+    showRows: (count) => {
+      state.session = f.session(count);
+      state.sshd = f.sshd;
+      state.selected.clear();
+      keys.renderServer();
+      term.openTerminal();
+    },
+    measure: () => {
+      const panel = document.querySelector('.server-panel');
+      const wrap = panel.querySelector('.table-wrap');
+      const table = wrap.querySelector('table');
+      const splitter = document.getElementById('termSplitter');
+      const range = document.createRange();
+      range.selectNodeContents(table.querySelector('th.col-status'));
+      const text = range.getBoundingClientRect();
+      const sr = splitter.getBoundingClientRect();
+      // 量实际伪元素横条的中心，而不是复用应用的 --align-x 计算。
+      const bar = getComputedStyle(splitter, '::after');
+      const transform = bar.transform === 'none' ? 0 : new DOMMatrixReadOnly(bar.transform).m41;
+      const center = sr.left + parseFloat(bar.left) + transform + parseFloat(bar.width) / 2;
+      const tr = document.getElementById('termPanel').getBoundingClientRect();
+      const outer = ['html', 'body', '#layout', '.server-panel', '.topbar', '.logbar'].every((selector) => {
+        const el = document.querySelector(selector);
+        const r = el.getBoundingClientRect();
+        return el.scrollWidth <= el.clientWidth + 1 && el.scrollHeight <= el.clientHeight + 1 &&
+          r.left >= -1 && r.top >= -1 && r.right <= innerWidth + 1 && r.bottom <= innerHeight + 1;
+      });
+      const ctl = term.getTermCtl();
+      const proposed = ctl && ctl.fit.proposeDimensions();
+      const resize = f.sent.filter((m) => m.t === 'resize').at(-1);
+      return {
+        rows: document.querySelectorAll('#keyBody input[data-fp]').length,
+        compact: sr.top - table.getBoundingClientRect().bottom >= -0.5 &&
+          sr.top - table.getBoundingClientRect().bottom <= 2 && wrap.clientHeight <= table.offsetHeight + 2,
+        aligned: text.width > 0 && sr.width > 0 && Math.abs(center - (text.left + text.width / 2)) < 1,
+        minHeight: tr.height >= 180,
+        fills: Math.abs(tr.bottom - (panel.getBoundingClientRect().bottom - panel.clientTop)) <= 2,
+        outer,
+        scrollable: wrap.scrollHeight > wrap.clientHeight && ['auto', 'scroll'].includes(getComputedStyle(wrap).overflowY),
+        fitted: !!proposed && ctl.term.cols === proposed.cols && ctl.term.rows === proposed.rows &&
+          !!resize && resize.cols === proposed.cols && resize.rows === proposed.rows,
+      };
+    },
+    cleanup: () => {
+      term.destroyTerminal();
+      state.session = null;
+      state.connecting = false;
+      state.selected.clear();
+      keys.renderServer();
+      window.fetch = realFetch;
+      window.WebSocket = RealWS;
+      delete window.__smokeUi;
+    },
+  };
+  window.WebSocket = class {
+    constructor() {
+      this.readyState = 1;
+      this.closed = false;
+      f.sockets.push(this);
+      setTimeout(() => this.onopen && this.onopen(), 0);
+    }
+    send(raw) { f.sent.push(JSON.parse(raw)); }
+    close() { this.closed = true; this.readyState = 3; }
+  };
+  // 全拦截：即使回归误发 connect，也绝不接触真实 SSH 服务。
+  window.fetch = async (input, options = {}) => {
+    const url = new URL(typeof input === 'string' ? input : input.url, location.href);
+    const request = { path: url.pathname, method: options.method || 'GET', body: options.body && JSON.parse(options.body) };
+    f.requests.push(request);
+    let reply;
+    if (request.path === '/api/refresh' && f.refreshReply) {
+      const pending = f.refreshReply;
+      f.refreshReply = null;
+      reply = await pending;
+    } else if (request.path === '/api/sshd') {
+      request.validSid = url.searchParams.get('sid') === state.session?.sid;
+      request.modeAtRequest = state.mode;
+      if (f.sshdReply) {
+        const pending = f.sshdReply;
+        f.sshdReply = null;
+        reply = await pending;
+      } else {
+        reply = { data: f.sshd };
+      }
+    } else if (request.path === '/api/disconnect') {
+      reply = { data: {} };
+    } else {
+      reply = { status: 500, error: 'Unexpected smoke request' };
+    }
+    return new Response(JSON.stringify({ ok: !reply.error, data: reply.data, error: reply.error }), {
+      status: reply.status || 200, headers: { 'Content-Type': 'application/json' },
+    });
+  };
+  window.__smokeUi = f;
+}
+
+async function runUiRegression(send) {
+  const checks = [];
+  await evaluate(send, installUiFixture);
+  try {
+    checks.push(...await evaluate(send, async () => {
+      const f = window.__smokeUi;
+      const { state, term, keys } = f;
+      const results = [];
+      const check = (name, ok) => results.push([name, !!ok]);
+      const ui = window.keywarden.ui;
+      check('UI 桥接及终端高度接口存在', !!ui && typeof ui.get === 'function' && typeof ui.set === 'function' &&
+        ui.initial.mode === 'keys' && ui.initial.termHeight === 0 &&
+        ['applyTermHeight', 'saveTermHeight', 'resetTermHeight', 'initTermHeight', 'getTermCtl'].every((k) => typeof term[k] === 'function'));
+      f.button('term').click();
+      await f.frames();
+      check('无会话切纯终端显示空态且不启动连接', state.mode === 'term' && document.body.classList.contains('mode-term') &&
+        f.visible('#termEmpty') && !f.visible('.table-wrap') && !f.visible('#termPanel') &&
+        !term.getTermCtl() && f.sockets.length === 0 && f.requests.length === 0 &&
+        f.button('term').getAttribute('aria-pressed') === 'true' && f.button('keys').getAttribute('aria-pressed') === 'false');
+      state.connecting = true;
+      // dispatchEvent 不受 disabled 影响，验证状态保护而非仅验证按钮外观。
+      f.button('keys').dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      await f.frames();
+      check('connecting 时不能切回密钥', state.mode === 'term' && f.requests.length === 0);
+      state.connecting = false;
+      f.button('keys').click();
+      state.connecting = true;
+      f.button('term').dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      await f.frames();
+      check('connecting 时不能切入纯终端', state.mode === 'keys' && !document.body.classList.contains('mode-term'));
+      state.connecting = false;
+      f.showRows(1);
+      await f.frames();
+      const ctl = term.getTermCtl();
+      const sid = state.session.sid;
+      document.getElementById('btnLocal').click();
+      await f.frames();
+      check('模式切换前表格本地库和授权路径可见', f.visible('.table-wrap') && f.visible('#localPanel') && f.visible('#serverMeta .meta-path'));
+      f.button('term').click();
+      await f.frames();
+      check('纯终端隐藏密钥工具本地库及授权路径',
+        ['.table-wrap', '#keyTools', '#localPanel', '#btnLocal', '#termSplitter', '#btnAdd', '#btnDelete', '#btnRefresh', '#btnBackups'].every((s) => !f.visible(s)) &&
+        !document.querySelector('#serverMeta .meta-path') && !document.getElementById('layout').classList.contains('local-open') &&
+        !f.visible('#termEmpty') && f.visible('#termPanel'));
+      f.button('keys').click();
+      await f.frames();
+      check('已有密钥切模式保留会话与终端且不补读不重连', state.mode === 'keys' && state.session.sid === sid &&
+        term.getTermCtl() === ctl && f.sockets.length === 1 && !ctl.ws.closed && f.requests.length === 0 &&
+        f.visible('.table-wrap') && f.visible('#serverMeta .meta-path'));
+
+      f.button('term').click();
+      const unloaded = { ...f.session(), keysLoaded: false, items: [], remotePath: '' };
+      state.session = unloaded;
+      state.sshd = null;
+      keys.renderServer();
+      f.holdRefresh();
+      f.button('keys').click();
+      await f.frames();
+      check('按需补读使用 POST 且完成前留在纯终端', state.mode === 'term' && state.session === unloaded &&
+        f.button('keys').disabled && f.button('term').disabled && f.requests.length === 1 &&
+        f.requests[0].path === '/api/refresh' && f.requests[0].method === 'POST' && f.requests[0].body.sid === sid);
+      f.button('keys').dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      check('补读中重复切换不会重复请求', f.requests.length === 1);
+      f.releaseRefresh({ status: 503, error: 'Synthetic refresh failure' });
+      await f.until(() => !f.button('keys').disabled);
+      check('补读失败留 term 并保留 sid 与 termCtl', state.mode === 'term' && document.body.classList.contains('mode-term') &&
+        state.session === unloaded && state.session.sid === sid && term.getTermCtl() === ctl && !ctl.ws.closed &&
+        !f.button('keys').disabled && f.requests.length === 1 && !!document.querySelector('.toast.err'));
+      f.holdRefresh();
+      f.button('keys').click();
+      f.releaseRefresh({ data: f.session() });
+      await f.until(() => state.mode === 'keys' && state.sshd?.available);
+      await f.frames();
+      check('再次补读成功才切 keys 并读取 sshd', state.mode === 'keys' && state.session.keysLoaded === true &&
+        f.visible('.table-wrap') && f.visible('#serverMeta .meta-path') && f.requests.length === 3 &&
+        f.requests[1].path === '/api/refresh' && f.requests[1].method === 'POST' && f.requests[1].body.sid === sid &&
+        f.requests[2].path === '/api/sshd' && f.requests[2].method === 'GET' && f.requests[2].validSid &&
+        f.requests[2].modeAtRequest === 'keys' && state.sshd?.state === 'key-only');
+      check('补读成功不替换终端实例且不重连', state.session.sid === sid && term.getTermCtl() === ctl && f.sockets.length === 1 && !ctl.ws.closed);
+      f.button('term').click();
+      f.button('keys').click();
+      await f.frames();
+      check('已补读会话再次切换不重复补读或查询 sshd', f.requests.length === 3 && term.getTermCtl() === ctl);
+
+      f.button('term').click();
+      state.session = { ...f.session(), keysLoaded: false, items: [] };
+      state.sshd = null;
+      keys.renderServer();
+      f.holdRefresh();
+      f.button('keys').click();
+      document.getElementById('btnDisconnect').click();
+      await f.until(() => state.session === null);
+      check('补读中断开会销毁原终端', !state.session && !term.getTermCtl() && ctl.ws.closed &&
+        f.requests.at(-1).path === '/api/disconnect' && f.requests.at(-1).method === 'POST');
+      f.releaseRefresh({ data: f.session() });
+      await f.until(() => !f.button('keys').disabled);
+      await f.frames();
+      check('补读迟到响应不会复活旧会话', !state.session && !term.getTermCtl() && state.mode === 'term' &&
+        f.visible('#termEmpty') && !f.visible('#termPanel') && f.sockets.length === 1 && f.requests.length === 5 &&
+        !f.button('keys').disabled && !f.button('term').disabled);
+      f.button('keys').click();
+      state.session = f.session();
+      state.sshd = null;
+      keys.renderServer();
+      const sshd = await import('/js/sshd.js');
+      const connect = await import('/js/connect.js');
+      let releaseSshd;
+      f.sshdReply = new Promise((resolve) => { releaseSshd = resolve; });
+      const probe = sshd.refreshSshdBadge();
+      f.holdRefresh();
+      const refresh = connect.refreshSession();
+      f.releaseRefresh({ data: f.session() });
+      await refresh;
+      releaseSshd({ data: f.sshd });
+      await probe;
+      check('同一会话刷新密钥后仍接收迟到的登录状态', state.sshd?.available && !!document.querySelector('.sshd-badge'));
+      f.sshdReply = new Promise((resolve) => { releaseSshd = resolve; });
+      const staleProbe = sshd.refreshSshdBadge();
+      state.session = { ...f.session(), sid: 'smoke-next-session' };
+      state.sshd = null;
+      releaseSshd({ data: f.sshd });
+      await staleProbe;
+      check('更换会话后丢弃旧登录状态', state.sshd === null);
+      return results;
+    }));
+
+    // CDP 设置 CSS viewport，不受实机显示器大小限制，且不改应用样式。
+    for (const [width, height] of [[1280, 820], [1440, 900], [1920, 1080], [1024, 680]]) {
+      await send('Emulation.setDeviceMetricsOverride', { width, height, deviceScaleFactor: 1, mobile: false });
+      const results = await evaluate(send, async (width, height) => {
+        const f = window.__smokeUi;
+        const results = [];
+        const check = (name, ok) => results.push([width + 'x' + height + ' ' + name, !!ok]);
+        f.showRows(1);
+        await f.frames();
+        let m = f.measure();
+        check('视口尺寸准确', innerWidth === width && innerHeight === height);
+        check('单行表紧贴分隔条且终端填满剩余空间', m.rows === 1 && m.compact && m.minHeight && m.fills);
+        check('状态文字与横条中心误差小于一像素', m.aligned);
+        check('无外层溢出', m.outer);
+        const ctl = f.term.getTermCtl();
+        const sockets = f.sockets.length;
+        document.getElementById('termClose').click();
+        await f.frames();
+        const hidden = !f.visible('#termPanel') && !f.visible('#termSplitter') && !document.querySelector('.server-panel').classList.contains('term-open');
+        document.getElementById('btnTerm').click();
+        await f.frames();
+        m = f.measure();
+        check('收起再打开保持会话与紧凑对齐', hidden && f.term.getTermCtl() === ctl && f.sockets.length === sockets &&
+          !ctl.ws.closed && m.compact && m.aligned && m.outer);
+        for (const action of ['展开', '收起']) {
+          document.getElementById('btnLocal').click();
+          await f.frames();
+          m = f.measure();
+          check(action + '侧栏后仍对齐且无溢出', f.visible('#localPanel') === (action === '展开') && m.aligned && m.compact && m.outer);
+        }
+        f.showRows(60);
+        await f.frames();
+        const wrap = document.querySelector('.server-panel .table-wrap');
+        wrap.scrollTop = wrap.scrollHeight;
+        await f.frames();
+        m = f.measure();
+        check('多行表可滚动且终端至少一百八十像素', m.rows === 60 && m.scrollable && wrap.scrollTop > 0 && m.minHeight && m.fills && m.outer);
+        check('滚动后状态文字仍与横条对齐', m.aligned);
+        check('终端 ResizeObserver 自动 fit 并发送尺寸', m.fitted);
+        document.querySelector('#keyFilter [data-filter="used"]').click();
+        await f.frames();
+        m = f.measure();
+        check('筛选成一行后无留白且保持对齐', m.rows === 1 && m.compact && m.aligned && m.minHeight && m.outer);
+        document.querySelector('#keyFilter [data-filter="all"]').click();
+        const search = document.getElementById('keySearch');
+        search.value = 'smoke-row-000';
+        search.dispatchEvent(new Event('input', { bubbles: true }));
+        await f.frames();
+        m = f.measure();
+        check('搜索后保持紧凑对齐', m.rows === 1 && m.compact && m.aligned && m.outer);
+        document.getElementById('keySearchClear').click();
+        await f.frames();
+        m = f.measure();
+        check('清空筛选恢复多行滚动且无外层溢出', m.rows === 60 && m.scrollable && m.minHeight && m.aligned && m.outer);
+        return results;
+      }, width, height);
+      checks.push(...results);
+    }
+
+    await send('Emulation.setDeviceMetricsOverride', { width: 1280, height: 820, deviceScaleFactor: 1, mobile: false });
+    checks.push(...await evaluate(send, async () => {
+      const f = window.__smokeUi;
+      f.showRows(1);
+      await f.frames();
+      const panel = document.getElementById('termPanel');
+      const splitter = document.getElementById('termSplitter');
+      const y = splitter.getBoundingClientRect().top + 3;
+      const height = panel.offsetHeight;
+      splitter.dispatchEvent(new MouseEvent('mousedown', { clientY: y, bubbles: true, button: 0 }));
+      document.dispatchEvent(new MouseEvent('mousemove', { clientY: y + height - 230, bubbles: true, buttons: 1 }));
+      document.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, button: 0 }));
+      await f.until(() => window.keywarden.ui.get().termHeight === 230);
+      await f.frames();
+      const dragged = panel.offsetHeight === 230 && panel.parentElement.classList.contains('term-manual') &&
+        window.keywarden.ui.get().mode === 'keys' && window.keywarden.ui.get().termHeight === 230;
+      f.term.applyTermHeight(40);
+      const minimum = panel.offsetHeight === 180;
+      f.term.applyTermHeight();
+      const restoredHeight = panel.offsetHeight === 230;
+      splitter.dispatchEvent(new MouseEvent('mousedown', { clientY: y, bubbles: true, button: 0 }));
+      document.dispatchEvent(new MouseEvent('mousemove', { clientY: y + 600, bubbles: true, buttons: 1 }));
+      const overdrag = panel.offsetHeight === 180 && panel.parentElement.classList.contains('term-manual');
+      document.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, button: 0 }));
+      f.term.saveTermHeight(230);
+      await f.until(() => window.keywarden.ui.get().termHeight === 230);
+      splitter.dispatchEvent(new MouseEvent('mousedown', { clientY: y, bubbles: true, button: 2 }));
+      document.dispatchEvent(new MouseEvent('mousemove', { clientY: y + 40, bubbles: true, buttons: 2 }));
+      const rightClickIgnored = panel.offsetHeight === 230;
+      document.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, button: 2 }));
+      f.term.saveTermHeight(230);
+      await f.until(() => window.keywarden.ui.get().termHeight === 230);
+      return [
+        ['拖动终端保存手动高度且不覆盖模式', dragged],
+        ['手动高度下限为一百八十像素', minimum],
+        ['无参 applyTermHeight 恢复已保存高度', restoredHeight],
+        ['拖过下边界仍保持最小手动高度', overdrag],
+        ['右键不会启动分隔条拖动', rightClickIgnored],
+      ];
+    }));
+    for (const [width, height] of [[1440, 900], [1920, 1080], [1024, 680], [1280, 820]]) {
+      await send('Emulation.setDeviceMetricsOverride', { width, height, deviceScaleFactor: 1, mobile: false });
+      const result = await evaluate(send, async (boundary) => {
+        const f = window.__smokeUi;
+        await f.frames();
+        const panel = document.getElementById('termPanel');
+        const m = f.measure();
+        return {
+          // 边界窗口允许夹紧可视高度，但保存值不能丢；放大后必须回到 230。
+          persisted: panel.parentElement.classList.contains('term-manual') && window.keywarden.ui.get().termHeight === 230 &&
+            (boundary ? panel.offsetHeight >= 180 && panel.offsetHeight <= 230 : panel.offsetHeight === 230),
+          fitted: m.outer && m.fitted,
+        };
+      }, width === 1024);
+      checks.push([width + 'x' + height + ' resize 不重置手动高度', result.persisted]);
+      checks.push([width + 'x' + height + ' resize 自动 fit 且无外层溢出', result.fitted]);
+    }
+    checks.push(...await evaluate(send, async () => {
+      const f = window.__smokeUi;
+      document.getElementById('termSplitter').dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
+      await f.until(() => window.keywarden.ui.get().termHeight === 0);
+      await f.frames();
+      const panel = document.getElementById('termPanel');
+      const m = f.measure();
+      const reset = window.keywarden.ui.get().termHeight === 0 && !panel.parentElement.classList.contains('term-manual') &&
+        panel.style.height === '' && m.compact && m.minHeight && m.fills && m.aligned;
+      f.term.saveTermHeight(230);
+      await f.until(() => window.keywarden.ui.get().termHeight === 230);
+      f.button('term').click();
+      await f.until(() => window.keywarden.ui.get().mode === 'term');
+      await f.frames();
+      const ui = window.keywarden.ui.get();
+      return [
+        ['双击分隔条将高度存为零并恢复自适应', reset],
+        ['重启前持久化纯终端模式与手动高度', ui.mode === 'term' && ui.termHeight === 230 && f.state.mode === 'term'],
+        ['假会话未产生任何连接请求', f.requests.every((r) => ['/api/refresh', '/api/sshd', '/api/disconnect'].includes(r.path))],
+      ];
+    }));
+    for (const [width, height] of [[1440, 900], [1024, 680], [1280, 820]]) {
+      await send('Emulation.setDeviceMetricsOverride', { width, height, deviceScaleFactor: 1, mobile: false });
+      const result = await evaluate(send, async () => {
+        const f = window.__smokeUi;
+        await f.frames();
+        const panel = document.getElementById('termPanel');
+        const style = getComputedStyle(panel);
+        const m = f.measure();
+        return f.state.mode === 'term' && window.keywarden.ui.get().termHeight === 230 &&
+          style.flexGrow === '1' && style.flexShrink === '1' && m.fills && m.outer && m.fitted;
+      });
+      checks.push([width + 'x' + height + ' 纯终端忽略手动高度并随窗口填满', result]);
+    }
+  } finally {
+    await evaluate(send, () => window.__smokeUi.cleanup());
+    await send('Emulation.clearDeviceMetricsOverride');
+  }
+  return checks;
+}
+
 async function main() {
   if (process.platform !== 'win32') {
-    console.log('桌面冒烟测试只在 Windows 上运行，跳过');
+    console.log('PASS 桌面冒烟仅支持 Windows，本机跳过');
     return;
   }
   if (!fs.existsSync(ELECTRON)) {
@@ -82,7 +508,7 @@ async function main() {
     path.join(tmp, 'config.json'),
     JSON.stringify({
       settings: { localKeyDir: keysDir, saveDir: keysDir, remotePath: '' },
-      hosts: [{ id: 'smoke', name: 'smoke', host: '127.0.0.1', port: 22, username: 'smoke', identityFile: '' }],
+      hosts: [{ id: 'smoke', name: 'smoke', host: 'smoke.invalid', port: 22, username: 'smoke', identityFile: '' }],
     })
   );
 
@@ -101,11 +527,9 @@ async function main() {
   const child = spawn(ELECTRON, args, {
     cwd: ROOT,
     env,
-    stdio: ['ignore', 'pipe', 'pipe'],
+    // Electron 的启动日志包含调试地址；成功或失败均不转发。
+    stdio: 'ignore',
   });
-
-  let stderr = '';
-  child.stderr.on('data', (d) => (stderr += d.toString()));
 
   let restarted = null;
 
@@ -403,19 +827,25 @@ async function main() {
       saved = saveResult.result.value;
       break;
     }
+    const themeBeforeUi = fs.readFileSync(path.join(tmp, 'theme.json'), 'utf8');
+    const uiChecks = await runUiRegression(send);
     ws.close();
 
-    // 重启验证：同一数据目录再启动一次，端口变了（origin 变、localStorage 空），主题应从主进程记录恢复
+    // 同一 dataDir、全新 origin：UI 与主题各从自己的文件恢复，不靠 localStorage。
     let themeFile = '';
+    let uiFile = {};
+    const themeAfterUi = fs.readFileSync(path.join(tmp, 'theme.json'), 'utf8');
     try {
-      themeFile = JSON.parse(fs.readFileSync(path.join(tmp, 'theme.json'), 'utf8')).choice;
+      themeFile = JSON.parse(themeAfterUi).choice;
+      uiFile = JSON.parse(fs.readFileSync(path.join(tmp, 'ui.json'), 'utf8'));
     } catch {}
     // 单实例锁按 userData 划分，必须先关掉第一个进程再启动第二个
     try {
       execFileSync('taskkill', ['/PID', String(child.pid), '/T', '/F'], { stdio: 'ignore' });
     } catch {}
     await new Promise((r) => setTimeout(r, 500));
-    let restartState = { initial: '', stored: '', theme: '', port: '' };
+    let restartState = { initial: '', stored: '', theme: '' };
+    let restartChecks = [];
     for (let attempt = 0; attempt < 3 && !restartState.theme; attempt++) {
       try {
         if (restarted) {
@@ -426,8 +856,7 @@ async function main() {
         const restartPort = await freePort();
         const restartArgs = [`--remote-debugging-port=${restartPort}`, `--user-data-dir=${userDataDir}`, '--disable-gpu'];
         if (!APP_EXE) restartArgs.unshift('.');
-        restarted = spawn(ELECTRON, restartArgs, { cwd: ROOT, env, stdio: ['ignore', 'pipe', 'pipe'] });
-        restarted.stderr.on('data', () => {});
+        restarted = spawn(ELECTRON, restartArgs, { cwd: ROOT, env, stdio: 'ignore' });
         const page2 = await waitForPage(restartPort);
         const ws2 = new WebSocket(page2.webSocketDebuggerUrl);
         await new Promise((resolve, reject) => {
@@ -435,8 +864,8 @@ async function main() {
           ws2.once('error', reject);
         });
         const send2 = cdp(ws2);
-        const restartResult = await send2('Runtime.evaluate', {
-          expression: `(async () => {
+        try {
+          restartState = await evaluate(send2, async (previousOrigin) => {
             const version = () => document.getElementById('version');
             for (let i = 0; i < 100 && (!version() || version().textContent === 'v—'); i++) {
               await new Promise((res) => setTimeout(res, 100));
@@ -445,16 +874,56 @@ async function main() {
               initial: window.keywarden.theme.initial,
               stored: await window.keywarden.theme.get(),
               theme: document.documentElement.dataset.theme,
-              port: location.port
+              originChanged: location.origin !== previousOrigin,
+              uiInitial: window.keywarden.ui.initial,
+              uiStored: await window.keywarden.ui.get(),
             };
-          })()`,
-          awaitPromise: true,
-          returnByValue: true,
-        });
-        ws2.close();
-        restartState = restartResult.result.value;
+          }, new URL(page.url).origin);
+          await send2('Emulation.setDeviceMetricsOverride', { width: 1280, height: 820, deviceScaleFactor: 1, mobile: false });
+          await evaluate(send2, installUiFixture);
+          restartChecks = await evaluate(send2, async () => {
+            const f = window.__smokeUi;
+            try {
+              await f.frames();
+              const empty = f.state.mode === 'term' && document.body.classList.contains('mode-term') &&
+                !f.state.session && !f.term.getTermCtl() && f.visible('#termEmpty') && !f.visible('.table-wrap') &&
+                !f.visible('#termPanel') && f.button('term').getAttribute('aria-pressed') === 'true';
+              f.showRows(1);
+              await f.frames();
+              const ctl = f.term.getTermCtl();
+              const sid = f.state.session.sid;
+              const fillsPure = document.getElementById('termPanel').offsetHeight > 230;
+              f.button('keys').click();
+              await f.until(() => window.keywarden.ui.get().mode === 'keys');
+              await f.frames();
+              const restored = f.state.mode === 'keys' && f.state.session.sid === sid && f.term.getTermCtl() === ctl &&
+                document.getElementById('termPanel').offsetHeight === 230 &&
+                document.querySelector('.server-panel').classList.contains('term-manual') &&
+                window.keywarden.ui.get().termHeight === 230 && f.measure().aligned && f.measure().outer;
+              // 验证完仍保留 term/230，不能用测试清理覆盖重启前后的持久化结果。
+              f.button('term').click();
+              await f.until(() => window.keywarden.ui.get().mode === 'term');
+              await f.frames();
+              const ui = window.keywarden.ui.get();
+              return [
+                ['重启无会话直接显示纯终端空态', empty],
+                ['重启纯终端仍自动填满空间', fillsPure],
+                ['重启从 term 切 keys 恢复手动高度与原终端', restored],
+                ['重启切模式没有重连或额外补读', f.sockets.length === 1 && !ctl.ws.closed && f.requests.length === 0],
+                ['最终保留 term 与手动高度且主题未改变', ui.mode === 'term' && ui.termHeight === 230 &&
+                  window.keywarden.theme.get() === 'mist' && document.documentElement.dataset.theme === 'mist'],
+              ];
+            } finally {
+              f.cleanup();
+            }
+          });
+        } finally {
+          ws2.close();
+        }
       } catch (e) {
         if (attempt === 2) throw e;
+        restartState = { initial: '', stored: '', theme: '' };
+        restartChecks = [];
         await new Promise((r) => setTimeout(r, 700));
       }
     }
@@ -497,24 +966,29 @@ async function main() {
       ['再点一次收起', layout.hiddenAgain === true],
       ['终端粘贴事件能送达 PTY', paste.received === 'event-paste'],
       ['最大化/还原切换生效', maximized === true && restored === true],
+      ...uiChecks,
+      ['UI 单独写入数据目录 ui.json', uiFile.mode === 'term' && uiFile.termHeight === 230 &&
+        Object.keys(uiFile).sort().join(',') === 'mode,termHeight'],
+      ['UI 操作未迁移或改写 theme.json', themeBeforeUi === themeAfterUi &&
+        fs.readFileSync(path.join(tmp, 'theme.json'), 'utf8') === themeBeforeUi],
+      ['重启使用新 origin 验证持久化', restartState.originChanged === true],
+      ['重启 UI initial 与 get 恢复模式及高度', [restartState.uiInitial, restartState.uiStored].every((ui) =>
+        ui && ui.mode === 'term' && ui.termHeight === 230)],
+      ...restartChecks,
+      ['最终 ui.json 仍保留 term 与手动高度', (() => {
+        const ui = JSON.parse(fs.readFileSync(path.join(tmp, 'ui.json'), 'utf8'));
+        return ui.mode === 'term' && ui.termHeight === 230;
+      })()],
+      ['页面没有未处理异常或控制台错误', pageErrors.length === 0],
     ];
 
     let failed = 0;
     for (const [name, ok] of checks) {
-      console.log(`  ${ok ? '✓' : '✗'} ${name}`);
+      console.log(`${ok ? 'PASS' : 'FAIL'} ${name}`);
       if (!ok) failed++;
     }
-    if (failed) {
-      console.error('设置弹窗诊断：', JSON.stringify(settings));
-      console.error('布局诊断：', JSON.stringify(layout));
-      console.error('重启诊断：', JSON.stringify({ themeFile, restartState }));
-      if (pageErrors.length) console.error('页面错误：\n' + pageErrors.join('\n'));
-      throw new Error(`${failed} 项桌面冒烟检查失败`);
-    }
-    console.log('\n桌面冒烟测试通过\n');
-  } catch (e) {
-    if (stderr.trim()) console.error(stderr.slice(-2000));
-    throw e;
+    console.log(`${failed ? 'FAIL' : 'PASS'} 桌面冒烟：${checks.length - failed} 项通过，${failed} 项失败`);
+    if (failed) process.exitCode = 1;
   } finally {
     for (const proc of [child, restarted]) {
       if (!proc) continue;
@@ -530,12 +1004,13 @@ async function main() {
     try {
       fs.rmSync(tmp, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 });
     } catch {
-      console.warn(`  ! 临时目录未能删除，可手动清理：${tmp}`);
+      console.warn('FAIL 临时测试目录清理未完成');
     }
   }
 }
 
-main().catch((e) => {
-  console.error('桌面冒烟测试失败：', e.stack || e.message);
+main().catch(() => {
+  // 异常栈、页面错误与 Electron stderr 可能含地址或凭据，不能直接打印。
+  console.error('FAIL 桌面冒烟执行异常（运行时详情已隐藏）');
   process.exit(1);
 });

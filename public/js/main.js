@@ -21,9 +21,11 @@ import {
   termVisible,
   initTermHeight,
   saveTermHeight,
+  resetTermHeight,
+  applyTermHeight,
   getTermCtl,
-  TERM_HEIGHT_KEY,
 } from './terminal.js';
+import { initMode } from './mode.js';
 
 /* ------------------------------------------------------------------ */
 /* 事件绑定 + 启动                                                     */
@@ -116,6 +118,7 @@ function bind() {
     let startH = 0;
 
     splitter.addEventListener('mousedown', (e) => {
+      if (e.button !== 0) return;
       dragging = true;
       startY = e.clientY;
       startH = panel.offsetHeight;
@@ -126,8 +129,7 @@ function bind() {
 
     document.addEventListener('mousemove', (e) => {
       if (!dragging) return;
-      const next = Math.max(160, Math.min(startH - (e.clientY - startY), window.innerHeight - 240));
-      panel.style.height = `${next}px`;
+      applyTermHeight(Math.max(180, startH - (e.clientY - startY)));
       if (getTermCtl()) getTermCtl().fit.fit();
     });
 
@@ -137,10 +139,20 @@ function bind() {
       document.body.style.cursor = '';
       document.body.style.userSelect = '';
       saveTermHeight(panel.offsetHeight);
-      if (getTermCtl()) {
-        getTermCtl().fit.fit();
-        getTermCtl().sendResize();
-      }
+      alignSplitter();
+    });
+
+    // 双击恢复自适应：表格按内容收缩，终端吃掉剩余
+    splitter.addEventListener('dblclick', () => {
+      resetTermHeight();
+      requestAnimationFrame(() => {
+        alignSplitter();
+        const ctl = getTermCtl();
+        if (ctl) {
+          ctl.fit.fit();
+          ctl.sendResize();
+        }
+      });
     });
   })();
   $('btnDelete').addEventListener('click', () => askDelete([...state.selected]));
@@ -178,13 +190,9 @@ async function boot() {
   initSystemTheme();
   setSessionLostHandler(handleSessionLost);
   bind();
+  initMode();
   initTermHeight();
-
-  // 没手动拖过就跟着窗口走（拖过的话尊重用户的选择）
-  window.addEventListener('resize', () => {
-    if (!localStorage.getItem(TERM_HEIGHT_KEY)) initTermHeight();
-    alignSplitter();
-  });
+  window.addEventListener('resize', alignSplitter);
 
   try {
     const s = await api('/api/state');

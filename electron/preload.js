@@ -33,4 +33,9 @@ contextBridge.exposeInMainWorld('keywarden', {
     get: () => ipcRenderer.sendSync('kw:theme-get') || '',
     set: (choice) => ipcRenderer.invoke('kw:theme-set', choice),
   },
+  ui: {
+    initial: ipcRenderer.sendSync('kw:ui-get') || { mode: '', termHeight: 0 },
+    get: () => ipcRenderer.sendSync('kw:ui-get') || { mode: '', termHeight: 0 },
+    set: (patch) => ipcRenderer.invoke('kw:ui-set', patch),
+  },
 });

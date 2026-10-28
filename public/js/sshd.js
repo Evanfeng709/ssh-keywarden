@@ -111,9 +111,13 @@ async function refreshSshdBadge() {
     renderServer();
     return;
   }
+  const session = state.session;
   try {
-    state.sshd = await api(`/api/sshd?sid=${encodeURIComponent(state.session.sid)}`);
+    const status = await api(`/api/sshd?sid=${encodeURIComponent(session.sid)}`);
+    if (state.session?.sid !== session.sid) return;
+    state.sshd = status;
   } catch {
+    if (state.session?.sid !== session.sid) return;
     state.sshd = null;
   }
   renderServer();

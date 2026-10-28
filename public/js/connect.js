@@ -9,28 +9,37 @@ import { destroyTerminal, openTerminal, consumePendingTerminal } from './termina
 /* ------------------------------------------------------------------ */
 
 async function doConnect(hostId, extra = {}) {
+  if (state.connecting) return false;
+  state.connecting = true;
   const btn = $('btnConnect');
+  const label = btn.querySelector('.lbl');
   btn.disabled = true;
-  btn.textContent = '连接中…';
+  label.textContent = '连接中…';
+  $('hostSelect').disabled = true;
+  document.querySelectorAll('#modeSwitch button').forEach((b) => (b.disabled = true));
   logLine(`正在连接 ${hostId ? (state.hosts.find((h) => h.id === hostId) || {}).name || hostId : '主机'}…`, 'info');
 
+  const withKeys = state.mode !== 'term';
   try {
-    const data = await api('/api/connect', { method: 'POST', body: { hostId, ...extra } });
-    destroyTerminal(); // 换了服务器，旧终端必须关掉
+    const data = await api('/api/connect', { method: 'POST', body: { hostId, ...extra, withKeys } });
+    const openTerm = consumePendingTerminal() || !withKeys;
+    const previous = state.session;
+    destroyTerminal();
     state.session = data;
+    state.sshd = null;
+    if (previous) api('/api/disconnect', { method: 'POST', body: { sid: previous.sid } }).catch(() => {});
     state.selected.clear();
     renderServer();
     logLine(
-      `已连接 ${data.host.username}@${data.host.host}（${data.server.uname || '未知系统'}）· ${data.remotePath} · 共 ${data.stats.total} 把钥匙`,
+      withKeys
+        ? `已连接 ${data.host.username}@${data.host.host}（${data.server.uname || '未知系统'}）· ${data.remotePath} · 共 ${data.stats.total} 把钥匙`
+        : `已连接 ${data.host.username}@${data.host.host}（${data.server.uname || '未知系统'}）· 纯终端模式，未读取密钥`,
       'ok'
     );
     toast(`已连接 ${data.host.host}`, 'ok');
-    refreshSshdBadge();
+    if (withKeys) refreshSshdBadge();
 
-    // 用户是从「终端」按钮进来的，连上后直接把终端拉起来
-    if (consumePendingTerminal()) {
-      setTimeout(() => openTerminal(), 60);
-    }
+    if (openTerm) openTerminal();
     return true;
   } catch (e) {
     if (e.code === 'HOSTKEY_UNKNOWN' || e.code === 'HOSTKEY_CHANGED') {
@@ -42,8 +51,11 @@ async function doConnect(hostId, extra = {}) {
     openCredModal(e.message, hostId);
     return false;
   } finally {
+    state.connecting = false;
     btn.disabled = false;
-    btn.textContent = '连接';
+    label.textContent = '连接';
+    $('hostSelect').disabled = false;
+    document.querySelectorAll('#modeSwitch button').forEach((b) => (b.disabled = false));
   }
 }
 
@@ -155,14 +167,16 @@ async function refreshSession() {
 
 async function disconnect() {
   if (!state.session) return;
-  try {
-    await api('/api/disconnect', { method: 'POST', body: { sid: state.session.sid } });
-  } catch {}
+  const session = state.session;
   destroyTerminal();
-  logLine('已断开连接', 'info');
   state.session = null;
+  state.sshd = null;
   state.selected.clear();
   renderServer();
+  try {
+    await api('/api/disconnect', { method: 'POST', body: { sid: session.sid } });
+  } catch {}
+  logLine('已断开连接', 'info');
 }
 
 /** SSH 连接被服务器断开后，把界面拉回「未连接」状态，而不是留着一个坏会话 */

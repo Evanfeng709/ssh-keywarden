@@ -291,10 +291,12 @@ function isLoginKey(entry, identityFile) {
 /* ------------------------------------------------------------------ */
 
 function setConnected(connected) {
-  $('btnRefresh').disabled = !connected;
-  $('btnBackups').disabled = !connected;
-  $('btnAdd').disabled = !connected;
-  $('btnDelete').disabled = !connected || state.selected.size === 0;
+  document.body.classList.toggle('has-session', connected);
+  const keysReady = connected && state.mode === 'keys' && state.session.keysLoaded !== false;
+  $('btnRefresh').disabled = !keysReady;
+  $('btnBackups').disabled = !keysReady;
+  $('btnAdd').disabled = !keysReady;
+  $('btnDelete').disabled = !keysReady || state.selected.size === 0;
   $('btnDisconnect').disabled = !connected;
   // 终端按钮保持可点：没连接时点一下会明确提示「请先连接服务器」，
   // 比灰着让人以为坏了要好
@@ -302,19 +304,38 @@ function setConnected(connected) {
   $('btnTerm').title = connected ? '打开 SSH 终端' : '先连接服务器才能开终端';
 }
 
-/** 拖动条的视觉标记与「状态」列对齐
- *  注意：参照物必须用 .server-panel（始终可见）。终端面板收起时 display:none，
- *  拿它量宽度会得 0，对齐就永远不生效。 */
+// 表头文字左对齐，不能以整列中心作为拖动条的锚点。
 function alignSplitter() {
   const th = document.querySelector('.key-table th.col-status');
   const splitter = $('termSplitter');
-  const host = $('termPanel') && $('termPanel').parentElement;
-  if (!th || !splitter || !host) return;
-  const hr = host.getBoundingClientRect();
-  if (!hr.width) return;
-  const tr = th.getBoundingClientRect();
-  const x = tr.left - hr.left + tr.width / 2;
-  splitter.style.setProperty('--align-x', `${Math.max(40, Math.min(x, hr.width - 60))}px`);
+  if (!th || !splitter || !th.offsetParent) return;
+  const sr = splitter.getBoundingClientRect();
+  if (!sr.width) return;
+  const range = document.createRange();
+  range.selectNodeContents(th);
+  const tr = range.getBoundingClientRect();
+  const center = tr.width ? tr.left + tr.width / 2 : th.getBoundingClientRect().left + 10;
+  const x = Math.max(40, Math.min(center - sr.left, sr.width - 60));
+  splitter.style.setProperty('--align-x', `${x}px`);
+  observeSplitter();
+}
+
+let splitterObserved = false;
+
+/** 表格宽度会随本地侧栏、滚动条、字体加载变化，观察到就重算 */
+function observeSplitter() {
+  if (splitterObserved || typeof ResizeObserver !== 'function') return;
+  splitterObserved = true;
+  const ro = new ResizeObserver(() => requestAnimationFrame(alignSplitter));
+  const wrap = document.querySelector('.table-wrap');
+  const table = document.querySelector('.key-table');
+  if (wrap) {
+    ro.observe(wrap);
+    wrap.addEventListener('scroll', alignSplitter);
+  }
+  if (table) ro.observe(table);
+  ro.observe(document.querySelector('.key-table th.col-status'));
+  document.fonts.ready.then(alignSplitter);
 }
 
 /** 服务器信息条：主机（重点，可复制）/ 路径（可复制）/ 系统名，分段展示 */
@@ -324,7 +345,7 @@ function renderServerMeta(s) {
 
   const dotCls = s.authMethod === 'key' ? 'ok' : 'warn';
   const host = `${s.host.username}@${s.host.host}:${s.host.port}`;
-  const path = s.remotePath || '';
+  const path = state.mode === 'term' ? '' : s.remotePath || '';
   const uname = (s.server && s.server.uname) || '';
 
   const copyIcon =
@@ -546,6 +567,12 @@ function renderServer() {
     ? '主机配置里的登录私钥，下次连接会用它'
     : '本次连接使用的私钥（临时连接，未写入主机配置）';
   renderServerMeta(s);
+
+  if (state.mode === 'term' || s.keysLoaded === false) {
+    $('keyTools').classList.add('hidden');
+    renderNotice('');
+    return;
+  }
 
   renderNotice(
     !s.fileExists

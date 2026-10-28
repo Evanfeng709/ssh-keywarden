@@ -57,6 +57,19 @@ function saveThemeChoice(choice) {
   }
 }
 
+let uiState = { mode: 'keys', termHeight: 0 };
+
+function loadUiState() {
+  try {
+    const raw = JSON.parse(fs.readFileSync(path.join(appDataDir, 'ui.json'), 'utf8'));
+    const mode = raw && raw.mode === 'term' ? 'term' : 'keys';
+    const h = raw && raw.termHeight;
+    return { mode, termHeight: Number.isFinite(h) && h >= 180 && h <= 10000 ? Math.round(h) : 0 };
+  } catch {
+    return { mode: 'keys', termHeight: 0 };
+  }
+}
+
 function loadWindowState() {
   try {
     const raw = JSON.parse(fs.readFileSync(path.join(appDataDir, 'window-state.json'), 'utf8'));
@@ -140,6 +153,24 @@ function registerIpc() {
     }
     return themeChoice;
   });
+
+  ipcMain.on('kw:ui-get', (event) => {
+    event.returnValue = uiState;
+  });
+  ipcMain.handle('kw:ui-set', (_event, patch) => {
+    if (!patch || typeof patch !== 'object' || Array.isArray(patch)) return uiState;
+    const next = { ...uiState };
+    if (patch.mode === 'keys' || patch.mode === 'term') next.mode = patch.mode;
+    const h = patch.termHeight;
+    if (h === 0 || (Number.isFinite(h) && h >= 180 && h <= 10000)) next.termHeight = Math.round(h);
+    try {
+      fs.writeFileSync(path.join(appDataDir, 'ui.json'), JSON.stringify(next), 'utf8');
+    } catch {
+      throw new Error('无法保存视图设置');
+    }
+    uiState = next;
+    return uiState;
+  });
 }
 
 function hardenWebContents(win) {
@@ -207,6 +238,7 @@ async function boot() {
   const resolved = resolveAppDataDir();
   appDataDir = ensureDataDir(resolved.dir);
   themeChoice = loadThemeChoice();
+  uiState = loadUiState();
 
   if (resolved.migrateFrom.length) {
     const migrated = migrateData(appDataDir, resolved.migrateFrom);

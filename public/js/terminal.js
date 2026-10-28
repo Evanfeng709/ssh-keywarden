@@ -101,29 +101,61 @@ function bindClipboardUi() {
   });
 }
 
-/** 终端默认高度：窗口的 42%，用户拖动过就记住 */
-export const TERM_HEIGHT_KEY = 'kw.termHeight';
+const TERM_HEIGHT_KEY = 'kw.termHeight';
+let savedHeight = 0;
 
-function initTermHeight() {
+function readSavedHeight() {
+  try {
+    const ui = window.keywarden && window.keywarden.ui;
+    const h = Number(ui ? ui.initial.termHeight : localStorage.getItem(TERM_HEIGHT_KEY));
+    return Number.isFinite(h) && h >= 180 ? Math.round(h) : 0;
+  } catch {
+    return 0;
+  }
+}
+
+function applyTermHeight(px = savedHeight) {
   const panel = $('termPanel');
-  if (!panel) return;
-
-  const saved = Number(localStorage.getItem(TERM_HEIGHT_KEY));
-  if (saved && saved >= 160) {
-    panel.style.height = `${saved}px`;
+  const host = panel.parentElement;
+  host.classList.toggle('term-manual', px > 0);
+  if (!px) {
+    panel.style.height = '';
     return;
   }
+  const reserved = [...host.children]
+    .filter((el) => el !== panel && !el.classList.contains('table-wrap'))
+    .reduce((sum, el) => sum + el.getBoundingClientRect().height, 0);
+  // 保留表头和至少一行的位置，缩小窗口时不能把密钥表挤出视口。
+  const max = Math.max(180, host.clientHeight - reserved - 90);
+  panel.style.height = `${Math.max(180, Math.min(Math.round(px), max))}px`;
+}
 
-  // 没拖过：占内容区（服务器密钥面板）的一半
-  const host = panel.parentElement;
-  const base = host && host.clientHeight > 200 ? host.clientHeight : Math.round(window.innerHeight * 0.6);
-  panel.style.height = `${Math.round(base * 0.5)}px`;
+function initTermHeight() {
+  savedHeight = readSavedHeight();
+  applyTermHeight(savedHeight);
+  const observer = new ResizeObserver(() => {
+    if (state.mode !== 'term') applyTermHeight(savedHeight);
+  });
+  observer.observe($('termPanel').parentElement);
+  observer.observe(document.querySelector('.server-panel .panel-head'));
+  observer.observe($('keyTools'));
 }
 
 function saveTermHeight(px) {
-  try {
-    localStorage.setItem(TERM_HEIGHT_KEY, String(Math.round(px)));
-  } catch {}
+  savedHeight = px > 0 ? Math.max(180, Math.round(px)) : 0;
+  applyTermHeight(savedHeight);
+  const ui = window.keywarden && window.keywarden.ui;
+  if (ui) {
+    ui.set({ termHeight: savedHeight }).catch(() => toast('终端高度保存失败', 'warn'));
+  } else {
+    try {
+      localStorage.setItem(TERM_HEIGHT_KEY, String(savedHeight));
+    } catch {}
+  }
+}
+
+function resetTermHeight() {
+  saveTermHeight(0);
 }
 
 function termVisible() {
@@ -133,9 +165,11 @@ function termVisible() {
 function setTermVisible(v) {
   $('termPanel').classList.toggle('hidden', !v);
   $('termSplitter').classList.toggle('hidden', !v);
+  const host = $('termPanel').parentElement;
+  if (host) host.classList.toggle('term-open', v);
   $('btnTerm').classList.toggle('active', v);
   if (v) {
-    // 展开瞬间列宽才稳定，下一帧再对齐
+    if (state.mode !== 'term') applyTermHeight();
     requestAnimationFrame(alignSplitter);
   }
 }
@@ -289,13 +323,15 @@ function openTerminal() {
 
   term.onResize(() => sendResize());
 
-  const onWinResize = () => {
-    fit.fit();
-    sendResize();
-  };
-  window.addEventListener('resize', onWinResize);
+  const resizeObserver = new ResizeObserver(() => {
+    if (termVisible()) {
+      fit.fit();
+      sendResize();
+    }
+  });
+  resizeObserver.observe($('termBody'));
 
-  termCtl = { term, fit, ws, onWinResize, sendResize };
+  termCtl = { term, fit, ws, resizeObserver, sendResize };
 
   // 换主题时终端跟着换（xterm 不认 CSS 变量，只能整表替换）
   if (!themeBound) {
@@ -313,8 +349,11 @@ function hideTerminal() {
 
 /** 彻底销毁：断开连接、切换服务器时用 */
 function destroyTerminal() {
+  pendingTerminal = false;
   if (termCtl) {
-    window.removeEventListener('resize', termCtl.onWinResize);
+    termCtl.resizeObserver.disconnect();
+    termCtl.ws.onclose = null;
+    termCtl.ws.onerror = null;
     try {
       termCtl.ws.close();
     } catch {}
@@ -345,6 +384,8 @@ export {
   destroyTerminal,
   initTermHeight,
   saveTermHeight,
+  resetTermHeight,
+  applyTermHeight,
   termVisible,
   setTermVisible,
 };

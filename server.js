@@ -445,12 +445,16 @@ async function openSession(body) {
       // 系统信息只是展示用：受限账号或响应慢的服务器拿不到也不影响密钥管理
       log(`系统信息探测失败（不影响使用）：${e.message}`);
     }
-    const home = await ssh.resolveHome(client);
-    const remotePath = expandPath(target.remotePath, home);
+    const withKeys = body.withKeys !== false;
+    const home = withKeys ? await ssh.resolveHome(client) : '';
+    const remotePath = withKeys ? expandPath(target.remotePath, home) : '';
 
-    const raw = await ssh.readRemoteText(client, remotePath).catch((e) => {
-      throw new Error(`读取 ${remotePath} 失败：${e.message}`);
-    });
+    // 纯终端不依赖密钥文件路径或读取权限。
+    const raw = withKeys
+      ? await ssh.readRemoteText(client, remotePath).catch((e) => {
+          throw new Error(`读取 ${remotePath} 失败：${e.message}`);
+        })
+      : null;
 
     const sid = crypto.randomUUID();
     const session = {
@@ -461,6 +465,7 @@ async function openSession(body) {
       remotePath,
       server,
       fileExists: raw !== null,
+      keysLoaded: withKeys,
       usedKeyFp: authMethod === 'key' ? fingerprintOfPrivateKey(auth.privateKey, auth.passphrase) : '',
       authMethod,
       createdAt: Date.now(),
@@ -499,6 +504,7 @@ function sessionPayload(session, rawText) {
     home: session.home,
     remotePath: session.remotePath,
     fileExists: session.fileExists,
+    keysLoaded: Boolean(session.keysLoaded),
     authMethod: session.authMethod,
     usedKeyFp: session.usedKeyFp,
     items: parsed.items
@@ -538,6 +544,12 @@ function mustSession(body) {
   }
   s.lastUsed = Date.now();
   return s;
+}
+
+function mustKeySession(body) {
+  const session = mustSession(body);
+  if (!session.keysLoaded) throw new Error('请先切换到密钥管理并读取服务器密钥');
+  return session;
 }
 
 /** 找本地某个公钥对应的私钥文件（用于更换时做真实登录验证） */
@@ -1187,13 +1199,13 @@ async function handleApi(req, res, pathname, url) {
   }
 
   if (pathname === '/api/sshd' && method === 'GET') {
-    const session = mustSession({ sid: url.searchParams.get('sid') });
+    const session = mustKeySession({ sid: url.searchParams.get('sid') });
     return ok(res, await sshd.inspect(session.client));
   }
 
   if (pathname === '/api/sshd/password-auth' && method === 'POST') {
     const body = await readJson(req);
-    const session = mustSession(body);
+    const session = mustKeySession(body);
     const enableKeyOnly = Boolean(body.enable);
 
     const before = await sshd.inspect(session.client);
@@ -1280,19 +1292,24 @@ async function handleApi(req, res, pathname, url) {
   if (pathname === '/api/refresh' && method === 'POST') {
     const body = await readJson(req);
     const session = mustSession(body);
-    const raw = await ssh.readRemoteText(session.client, session.remotePath);
+    const home = session.keysLoaded ? session.home : await ssh.resolveHome(session.client);
+    const remotePath = session.keysLoaded ? session.remotePath : expandPath(session.target.remotePath, home);
+    const raw = await ssh.readRemoteText(session.client, remotePath);
+    session.home = home;
+    session.remotePath = remotePath;
     session.fileExists = raw !== null;
+    session.keysLoaded = true;
     return ok(res, sessionPayload(session, raw || ''));
   }
 
   if (pathname === '/api/backups' && method === 'GET') {
-    const session = mustSession({ sid: url.searchParams.get('sid') });
+    const session = mustKeySession({ sid: url.searchParams.get('sid') });
     const list = await backups.listBackups(session.client, session.remotePath);
     return ok(res, { remotePath: session.remotePath, backups: list });
   }
 
   if (pathname === '/api/backups/diff' && method === 'GET') {
-    const session = mustSession({ sid: url.searchParams.get('sid') });
+    const session = mustKeySession({ sid: url.searchParams.get('sid') });
     const name = url.searchParams.get('name') || '';
     const backupPath = backups.backupPathFor(session.remotePath, name);
     const parsedName = backups.parseBackupName(session.remotePath, name);
@@ -1307,25 +1324,25 @@ async function handleApi(req, res, pathname, url) {
 
   if (pathname === '/api/backups/restore' && method === 'POST') {
     const body = await readJson(req);
-    const session = mustSession(body);
+    const session = mustKeySession(body);
     return ok(res, await restoreBackup(session, body));
   }
 
   if (pathname === '/api/add' && method === 'POST') {
     const body = await readJson(req);
-    const session = mustSession(body);
+    const session = mustKeySession(body);
     return ok(res, await addKey(session, body));
   }
 
   if (pathname === '/api/replace' && method === 'POST') {
     const body = await readJson(req);
-    const session = mustSession(body);
+    const session = mustKeySession(body);
     return ok(res, await replaceKey(session, body));
   }
 
   if (pathname === '/api/delete' && method === 'POST') {
     const body = await readJson(req);
-    const session = mustSession(body);
+    const session = mustKeySession(body);
     return ok(res, await deleteKeys(session, body));
   }
 

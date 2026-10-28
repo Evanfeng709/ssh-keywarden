@@ -13,6 +13,7 @@ const os = require('os');
 const path = require('path');
 const http = require('http');
 const { Server } = require('ssh2');
+const WSClient = require('ws');
 
 const keygen = require('../src/keygen');
 const { parseAuthorizedKeys } = require('../src/authorized');
@@ -57,6 +58,9 @@ const keyDPath = writeLocal(keyD, 'id_d');
 
 const FS = new Map(); // 路径 -> 文本
 const DIRS = new Set();
+// 只统计客户端发起的远端命令；夹具初始化及 SSH 服务端认证读取不计入。
+const remoteOps = { reads: 0, writes: 0, homeReads: 0, sshdProbes: 0 };
+let denyRemoteReads = false;
 
 const SEED = [
   keyA.publicKeyLine,
@@ -94,17 +98,26 @@ function mockExec(cmd, stdin) {
   const b64run = c.match(/^echo '([A-Za-z0-9+/=]+)' \| base64 -d \| (?:sudo -n )?sh -s$/);
   if (b64run) {
     const script = Buffer.from(b64run[1], 'base64').toString('utf8');
-    if (script.includes('###UID')) return { out: MOCK_SSHD_OUT };
+    if (script.includes('###UID')) {
+      remoteOps.sshdProbes++;
+      return { out: MOCK_SSHD_OUT };
+    }
     return { out: '', err: 'mock: 未模拟该脚本', code: 1 };
   }
 
-  if (c === 'printf "%s" "$HOME"') return { out: HOME };
+  if (c === 'printf "%s" "$HOME"' || c === 'getent passwd "$(id -u)" | cut -d: -f6') {
+    remoteOps.homeReads++;
+    return { out: HOME };
+  }
   if (c === 'uname -srm 2>/dev/null') return { out: 'Linux 6.1.0-mock x86_64' };
   if (c === 'id -un 2>/dev/null') return { out: 'tester' };
   if (c === 'hostname 2>/dev/null') return { out: 'mock-nas' };
   if (c.startsWith('uname -srm')) return { out: 'Linux 6.1.0-mock x86_64\n___\nroot\n___\nmock-nas' };
   if (c === 'printf __LOGIN_OK__') return { out: '__LOGIN_OK__' };
-  if (c.startsWith('chmod ')) return { out: '' };
+  if (c.startsWith('chmod ')) {
+    remoteOps.writes++;
+    return { out: '' };
+  }
 
   // 备份列表：for f in '<authorized_keys>'.bak.*; do printf '%s\n' "$f"; done
   if ((m = c.match(/^for f in '([^']+)'\.bak\.\*; do printf '%s\\n' "\$f"; done$/))) {
@@ -114,11 +127,13 @@ function mockExec(cmd, stdin) {
   }
 
   if ((m = c.match(/^mkdir -p '([^']+)'/))) {
+    remoteOps.writes++;
     DIRS.add(m[1]);
     return { out: c.includes('echo __OK__') ? '__OK__' : '' };
   }
 
   if (c.includes('__SKIP__')) {
+    remoteOps.writes++;
     const cp = c.match(/cp '([^']+)' '([^']+)'/);
     if (!cp) return { out: '', err: 'mock: 备份命令无法解析', code: 1 };
     if (!FS.has(cp[1])) return { out: '__SKIP__' };
@@ -127,17 +142,23 @@ function mockExec(cmd, stdin) {
   }
 
   if (c.includes('__KW_MISSING__')) {
+    remoteOps.reads++;
     const r = c.match(/base64 < '([^']+)'/);
+    if (denyRemoteReads && r && r[1] === AUTH_PATH) {
+      return { out: '', err: 'Permission denied', code: 1 };
+    }
     if (!r || !FS.has(r[1])) return { out: '__KW_MISSING__' };
     return { out: Buffer.from(FS.get(r[1]), 'utf8').toString('base64') };
   }
 
   if ((m = c.match(/^base64 -d > '([^']+)'/))) {
+    remoteOps.writes++;
     FS.set(m[1], Buffer.from(stdin.replace(/\s+/g, ''), 'base64').toString('utf8'));
     return { out: '' };
   }
 
   if ((m = c.match(/^mv -f '([^']+)' '([^']+)'/))) {
+    remoteOps.writes++;
     if (!FS.has(m[1])) return { out: '', err: 'mv: cannot stat: No such file', code: 1 };
     FS.set(m[2], FS.get(m[1]));
     FS.delete(m[1]);
@@ -145,6 +166,7 @@ function mockExec(cmd, stdin) {
   }
 
   if ((m = c.match(/^rm -f '([^']+)'/))) {
+    remoteOps.writes++;
     FS.delete(m[1]);
     return { out: '' };
   }
@@ -311,6 +333,49 @@ async function call(path, body) {
   return r.json.data;
 }
 
+// 同一条 WebSocket 在 refresh 前后分别发不同输入，防止旧输出冒充刷新后的回显。
+function terminalEcho(ws, text, expectPrompt = false) {
+  return new Promise((resolve, reject) => {
+    let output = '';
+    const timer = setTimeout(() => finish(new Error('终端回显超时（5s）')), 5000);
+    const finish = (err) => {
+      clearTimeout(timer);
+      ws.off('open', send);
+      ws.off('message', onMessage);
+      ws.off('error', finish);
+      ws.off('close', onClose);
+      ws.off('unexpected-response', onUnexpected);
+      if (err) reject(err);
+      else resolve(output);
+    };
+    const send = () => {
+      ws.send(JSON.stringify({ t: 'in', d: Buffer.from(`${text}\n`, 'utf8').toString('base64') }), (err) => {
+        if (err) finish(err);
+      });
+    };
+    const onMessage = (raw) => {
+      try {
+        const msg = JSON.parse(raw.toString());
+        if (msg.t === 'error') return finish(new Error(msg.message || '终端错误'));
+        if (msg.t !== 'out') return;
+        output += Buffer.from(msg.d, 'base64').toString('utf8');
+        if (output.includes(text) && (!expectPrompt || output.includes('mock-shell ready'))) finish();
+      } catch (e) {
+        finish(e);
+      }
+    };
+    const onClose = () => finish(new Error('终端在回显前关闭'));
+    const onUnexpected = () => finish(new Error('终端握手被拒绝'));
+    ws.on('message', onMessage);
+    ws.once('error', finish);
+    ws.once('close', onClose);
+    ws.once('unexpected-response', onUnexpected);
+    if (ws.readyState === WSClient.OPEN) send();
+    else if (ws.readyState === WSClient.CONNECTING) ws.once('open', send);
+    else onClose();
+  });
+}
+
 /* ------------------------------------------------------------------ */
 /* 5. 主流程                                                           */
 /* ------------------------------------------------------------------ */
@@ -406,6 +471,7 @@ async function main() {
   });
 
   console.log('\n[查看]');
+  const beforeDefaultConnect = { ...remoteOps };
   const s1 = await call('/api/connect', {
     host: '127.0.0.1',
     port: mockPort,
@@ -413,6 +479,14 @@ async function main() {
     identityFile: keyAPath,
     name: 'mock',
     trustFingerprint: HOST_KEY_FP,
+  });
+
+  test('不传 withKeys 时仍立即加载密钥，且连接不写远端文件', () => {
+    assert.strictEqual(s1.keysLoaded, true);
+    assert.strictEqual(remoteOps.reads, beforeDefaultConnect.reads + 1);
+    assert.strictEqual(remoteOps.writes, beforeDefaultConnect.writes);
+    assert.strictEqual(remoteOps.homeReads, beforeDefaultConnect.homeReads + 1);
+    assert.strictEqual(remoteOps.sshdProbes, beforeDefaultConnect.sshdProbes);
   });
 
   test('连上后能读到服务器信息', () => {
@@ -438,16 +512,163 @@ async function main() {
 
   console.log('\n[服务器登录方式检测]');
 
+  const beforeSshdProbe = remoteOps.sshdProbes;
   const sshdRes = JSON.parse((await request('GET', `/api/sshd?sid=${encodeURIComponent(s1.sid)}`, null)).raw);
 
   test('能读出密码登录 / 公钥登录状态，并判定当前不是仅密钥登录', () => {
     assert.strictEqual(sshdRes.ok, true, sshdRes.error);
+    assert.strictEqual(remoteOps.sshdProbes, beforeSshdProbe + 1);
     assert.strictEqual(sshdRes.data.available, true);
     assert.strictEqual(sshdRes.data.passwordAuth, true);
     assert.strictEqual(sshdRes.data.pubkeyAuth, true);
     assert.strictEqual(sshdRes.data.keyOnly, false);
     assert.strictEqual(sshdRes.data.state, 'both', '两种登录方式都开着时应为 both');
     assert.strictEqual(sshdRes.data.canWrite, true, 'mock 里是 root');
+  });
+
+  console.log('\n[纯终端：延迟加载授权密钥]');
+
+  for (const denied of [false, true]) {
+    const label = denied ? '授权文件拒读' : '授权文件可读';
+    const connectBody = {
+      host: '127.0.0.1',
+      port: mockPort,
+      username: 'tester',
+      // 拒读用密码认证，明确区分「允许登录」与「允许读授权文件」。
+      ...(denied ? { identityFile: '', password: MOCK_PASSWORD } : { identityFile: keyAPath }),
+    };
+    const beforeConnect = { ...remoteOps };
+    const beforeFiles = new Map(FS);
+    const beforeDirs = new Set(DIRS);
+    let ws;
+    denyRemoteReads = denied;
+    try {
+      const session = await call('/api/connect', { ...connectBody, withKeys: false });
+      test(`${label}：withKeys:false 返回未加载状态及空列表`, () => {
+        assert.ok(session.sid);
+        assert.strictEqual(session.keysLoaded, false);
+        assert.deepStrictEqual(session.items, []);
+        assert.deepStrictEqual(session.stats, { total: 0, malformed: 0, comments: 0 });
+        assert.strictEqual(session.authMethod, denied ? 'password' : 'key');
+      });
+
+      ws = new WSClient(
+        `ws://127.0.0.1:${process.env.PORT}/api/terminal?sid=${encodeURIComponent(session.sid)}&cols=80&rows=24`,
+        { headers: { Cookie: COOKIE } }
+      );
+      // HTTP 请求期间也接住错误；下一次回显会检查连接是否仍然可用。
+      ws.on('error', () => {});
+      const initialOut = await terminalEcho(ws, 'echo terminal-before-refresh', true);
+      test(`${label}：未加载密钥也能收到 shell 提示符并回显输入`, () => {
+        assert.ok(initialOut.includes('mock-shell ready'));
+        assert.ok(initialOut.includes('echo terminal-before-refresh'));
+      });
+      test(`${label}：纯终端连接及 shell 不读写授权文件、不探测 sshd`, () => {
+        assert.strictEqual(remoteOps.reads, beforeConnect.reads);
+        assert.strictEqual(remoteOps.writes, beforeConnect.writes);
+        assert.strictEqual(remoteOps.sshdProbes, beforeConnect.sshdProbes);
+        assert.deepStrictEqual(FS, beforeFiles);
+        assert.deepStrictEqual(DIRS, beforeDirs);
+      });
+      test(`${label}：首次 refresh 前不读取 home`, () => {
+        assert.strictEqual(remoteOps.homeReads, beforeConnect.homeReads);
+      });
+
+      const sidQuery = `?sid=${encodeURIComponent(session.sid)}`;
+      const beforeKeyActions = { ...remoteOps };
+      for (const endpoint of ['/api/sshd', '/api/backups', '/api/backups/diff']) {
+        const blocked = await request('GET', endpoint + sidQuery);
+        test(`${label}：未加载密钥时拒绝 ${endpoint}`, () => {
+          assert.strictEqual(blocked.json.ok, false);
+          assert.match(blocked.json.error, /请先切换到密钥管理/);
+        });
+      }
+      for (const endpoint of ['/api/sshd/password-auth', '/api/backups/restore', '/api/add', '/api/replace', '/api/delete']) {
+        const blocked = await request('POST', endpoint, { sid: session.sid });
+        test(`${label}：未加载密钥时拒绝 ${endpoint}`, () => {
+          assert.strictEqual(blocked.json.ok, false);
+          assert.match(blocked.json.error, /请先切换到密钥管理/);
+        });
+      }
+      test(`${label}：被拦截的密钥操作不执行远端命令`, () => {
+        assert.deepStrictEqual(remoteOps, beforeKeyActions);
+      });
+
+      if (denied) {
+        const beforeDeniedRefresh = { ...remoteOps };
+        const rejected = await request('POST', '/api/refresh', { sid: session.sid });
+        test('拒读时 refresh 返回权限错误而非会话失效', () => {
+          assert.ok(rejected.status >= 400 && rejected.status < 500);
+          assert.strictEqual(rejected.json.ok, false);
+          assert.match(rejected.json.error, /Permission denied/i);
+          assert.notStrictEqual(rejected.json.code, 'SESSION_LOST');
+          assert.strictEqual(remoteOps.reads, beforeDeniedRefresh.reads + 1);
+          assert.strictEqual(remoteOps.writes, beforeDeniedRefresh.writes);
+          assert.strictEqual(remoteOps.sshdProbes, beforeDeniedRefresh.sshdProbes);
+        });
+        const state = await request('GET', '/api/state');
+        test('refresh 拒读后原 sid 仍在会话列表中', () => {
+          assert.strictEqual(state.json.ok, true);
+          assert.ok(state.json.data.sessions.some((s) => s.sid === session.sid));
+        });
+        const afterFailure = await terminalEcho(ws, 'echo terminal-after-denied-refresh');
+        test('refresh 拒读后原 WebSocket shell 仍可收发', () => {
+          assert.ok(afterFailure.includes('echo terminal-after-denied-refresh'));
+        });
+
+        const readsBeforeDefault = remoteOps.reads;
+        await assertRejects(
+          () => call('/api/connect', connectBody),
+          /Permission denied/i,
+          '默认密钥连接仍会因授权文件拒读而失败'
+        );
+        test('拒读时默认连接确实尝试读取授权文件', () => {
+          assert.strictEqual(remoteOps.reads, readsBeforeDefault + 1);
+        });
+        denyRemoteReads = false;
+      }
+
+      const beforeRefresh = { ...remoteOps };
+      const refreshed = await call('/api/refresh', { sid: session.sid });
+      test(`${label}：refresh 在原 sid 上补读并填充密钥`, () => {
+        assert.strictEqual(refreshed.sid, session.sid);
+        assert.strictEqual(refreshed.keysLoaded, true);
+        assert.strictEqual(refreshed.home, HOME);
+        assert.strictEqual(refreshed.remotePath, AUTH_PATH);
+        assert.strictEqual(refreshed.fileExists, true);
+        assert.deepStrictEqual(refreshed.items, s1.items);
+        assert.deepStrictEqual(refreshed.stats, s1.stats);
+        assert.strictEqual(remoteOps.reads, beforeRefresh.reads + 1);
+        assert.strictEqual(remoteOps.writes, beforeRefresh.writes);
+        assert.strictEqual(remoteOps.sshdProbes, beforeRefresh.sshdProbes);
+      });
+      const afterRefresh = await terminalEcho(ws, 'echo terminal-after-loaded-refresh');
+      test(`${label}：加载密钥后原 shell 仍可用且没有远端写入或 sshd 探测`, () => {
+        assert.ok(afterRefresh.includes('echo terminal-after-loaded-refresh'));
+        assert.strictEqual(remoteOps.writes, beforeConnect.writes);
+        assert.strictEqual(remoteOps.sshdProbes, beforeConnect.sshdProbes);
+        assert.deepStrictEqual(FS, beforeFiles);
+        assert.deepStrictEqual(DIRS, beforeDirs);
+      });
+    } finally {
+      denyRemoteReads = false;
+      if (ws) ws.terminate();
+    }
+  }
+
+  const beforeExplicitKeys = { ...remoteOps };
+  const explicitKeys = await call('/api/connect', {
+    host: '127.0.0.1',
+    port: mockPort,
+    username: 'tester',
+    identityFile: keyAPath,
+    withKeys: true,
+  });
+  test('显式 withKeys:true 与默认连接一样立即加载密钥', () => {
+    assert.strictEqual(explicitKeys.keysLoaded, true);
+    assert.deepStrictEqual(explicitKeys.items, s1.items);
+    assert.strictEqual(remoteOps.reads, beforeExplicitKeys.reads + 1);
+    assert.strictEqual(remoteOps.writes, beforeExplicitKeys.writes);
   });
 
   console.log('\n[加密私钥 / passphrase]');
@@ -534,6 +755,7 @@ async function main() {
 
   console.log('\n[新增]');
 
+  const beforeAdd = { ...remoteOps };
   const add1 = await call('/api/add', {
     sid: s1.sid,
     mode: 'paste',
@@ -542,6 +764,8 @@ async function main() {
 
   test('粘贴公钥 → 写入成功并回读校验通过', () => {
     assert.strictEqual(add1.changed, true);
+    assert.ok(remoteOps.reads > beforeAdd.reads, '读计数器应捕获回读');
+    assert.ok(remoteOps.writes > beforeAdd.writes, '写计数器应捕获原子写入及备份');
     assert.ok(FS.get(AUTH_PATH).includes('fresh-key'));
     assert.ok(add1.steps.some((s) => s.includes('已备份原文件')), '应当有备份步骤');
     assert.ok(add1.steps.some((s) => s.includes('校验通过')));
@@ -993,7 +1217,6 @@ async function main() {
     identityFile: keyAPath,
   });
 
-  const WSClient = require('ws');
   const termUrl = `ws://127.0.0.1:${process.env.PORT}/api/terminal?sid=${encodeURIComponent(
     sTerm.sid
   )}&cols=80&rows=24`;

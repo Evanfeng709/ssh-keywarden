@@ -424,6 +424,32 @@ body.desktop .topbar select { -webkit-app-region: no-drag; }
   border-radius: 8px;
 }
 
+/* 视图模式：密钥管理 / 纯终端 */
+.mode-switch {
+  display: flex;
+  height: 30px;
+  flex: 0 0 auto;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-2);
+  overflow: hidden;
+}
+.mode-switch button {
+  height: 100%;
+  padding: 0 10px;
+  border: none;
+  border-right: 1px solid var(--border);
+  border-radius: 0;
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 12px;
+  white-space: nowrap;
+}
+.mode-switch button:last-child { border-right: none; }
+.mode-switch button:hover { background: var(--surface-3); color: var(--text); }
+.mode-switch button.on { background: var(--accent-soft); color: var(--accent-text); }
+body.desktop .mode-switch button { -webkit-app-region: no-drag; }
+
 .square-btn {
   width: 30px;
   height: 30px;
@@ -575,6 +601,7 @@ button.link-btn:hover { color: var(--text); }
 }
 
 .panel-head {
+  flex: 0 0 auto;
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
@@ -856,10 +883,16 @@ button.meta-path:hover {
 }
 
 .table-wrap {
-  flex: 1;
+  flex: 0 1 auto;
+  max-height: 60%;
   overflow: auto;
   position: relative;
 }
+/* 终端收起时表格接管全部剩余高度 */
+.server-panel:not(.term-open) .table-wrap { flex: 1 1 auto; max-height: none; }
+/* 手动拖过高度后改回「表格弹性、终端固定」，尊重用户的拖动结果 */
+.server-panel.term-manual .table-wrap { flex: 1 1 auto; max-height: none; }
+.server-panel.term-manual .term-panel { flex: 0 0 auto; }
 .table-wrap::-webkit-scrollbar { width: 10px; height: 10px; }
 .table-wrap::-webkit-scrollbar-thumb { background: var(--scroll-thumb); border-radius: 6px; }
 .table-wrap::-webkit-scrollbar-track { background: transparent; }
@@ -1401,9 +1434,9 @@ input[type="checkbox"]:checked::after {
 /* ---------------- 终端面板 ---------------- */
 
 .term-panel {
-  flex: 0 0 auto;
-  height: 50%;
-  min-height: 200px;
+  flex: 1 0 180px;
+  height: auto;
+  min-height: 180px;
   display: flex;
   flex-direction: column;
   background: var(--panel);
@@ -1473,12 +1506,38 @@ input[type="checkbox"]:checked::after {
 
 .term-body {
   flex: 1;
+  min-height: 0;
   padding: 6px 8px 8px;
   overflow: hidden;
   background: var(--panel);
 }
 .term-body .xterm { height: 100%; }
 .term-body .xterm-viewport { background: transparent !important; }
+
+/* ---------------- 纯终端模式 ---------------- */
+/* 只连 SSH，不看密钥：隐藏密钥相关的工具与操作，终端吃掉整个内容区 */
+
+.term-empty { display: none; flex: 1 1 auto; }
+body.mode-term:not(.has-session) .term-empty { display: flex; }
+body.mode-term .table-wrap,
+body.mode-term #keyTools,
+body.mode-term #termSplitter,
+body.mode-term #btnRefresh,
+body.mode-term #btnBackups,
+body.mode-term #btnAdd,
+body.mode-term #btnDelete,
+body.mode-term .act-sep,
+body.mode-term #btnLocal,
+body.mode-term #btnTerm,
+body.mode-term #termClose,
+body.mode-term .local-panel { display: none !important; }
+body.mode-term .layout { grid-template-columns: minmax(0, 1fr); }
+body.mode-term .server-panel .term-panel {
+  flex: 1 1 auto;
+  height: auto !important;
+  min-height: 0;
+  border-top: none;
+}
 
 /* ---------------- 文件 / 目录选择器 ---------------- */
 

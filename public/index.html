@@ -32,6 +32,11 @@
   </div>
 
   <div class="top-right">
+    <div class="mode-switch" id="modeSwitch" role="group" aria-label="视图模式">
+      <button type="button" data-mode="keys" class="on" title="管理服务器密钥">密钥</button>
+      <button type="button" data-mode="term" title="只开 SSH 终端，不读取服务器密钥">纯终端</button>
+    </div>
+
     <select id="hostSelect" title="选择主机"></select>
 
     <button id="btnLocal" class="square-btn" title="显示本地密钥库" aria-label="本地密钥库" aria-pressed="false" aria-controls="localPanel">
@@ -152,7 +157,12 @@
       </div>
     </div>
 
-    <div id="termSplitter" class="term-splitter hidden" title="拖动调整高度"></div>
+    <div id="termEmpty" class="empty term-empty">
+      <p>还没有连接服务器</p>
+      <p class="hint">纯终端模式只建立 SSH 会话并打开终端，不读取也不管理 authorized_keys。<br />选一台主机后点右上角「连接」。</p>
+    </div>
+
+    <div id="termSplitter" class="term-splitter hidden" title="拖动调整高度，双击恢复自适应"></div>
 
     <div id="termPanel" class="term-panel hidden">
       <div class="term-head">
