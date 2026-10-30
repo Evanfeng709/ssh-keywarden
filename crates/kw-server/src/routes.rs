@@ -70,6 +70,7 @@ pub fn bootstrap_hosts(state: &AppState) {
             port: Some(host.port),
             username: Some(host.username),
             identity_file: Some(host.identity_file),
+            identity_fingerprint: None,
             remote_path: None,
         });
     }

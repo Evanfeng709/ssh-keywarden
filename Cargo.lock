@@ -2983,7 +2983,7 @@ dependencies = [
 
 [[package]]
 name = "kw-core"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -2992,7 +2992,7 @@ dependencies = [
 
 [[package]]
 name = "kw-desktop"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "kw-server",
  "kw-store",
@@ -3010,7 +3010,7 @@ dependencies = [
 
 [[package]]
 name = "kw-ffi"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "base64 0.22.1",
  "kw-keys",
@@ -3027,7 +3027,7 @@ dependencies = [
 
 [[package]]
 name = "kw-keys"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "base64 0.22.1",
  "rand 0.8.8",
@@ -3042,7 +3042,7 @@ dependencies = [
 
 [[package]]
 name = "kw-server"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "aes-gcm 0.10.3",
  "anyhow",
@@ -3073,7 +3073,7 @@ dependencies = [
 
 [[package]]
 name = "kw-ssh"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3092,7 +3092,7 @@ dependencies = [
 
 [[package]]
 name = "kw-store"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "kw-core",
  "serde",
@@ -3104,7 +3104,7 @@ dependencies = [
 
 [[package]]
 name = "kw-sync"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "kw-server",
  "kw-ssh",

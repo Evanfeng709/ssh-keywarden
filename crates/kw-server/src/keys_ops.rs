@@ -296,10 +296,14 @@ fn line_of(k: &kw_keys::ParsedPublicKey) -> String {
 }
 
 /// 把主机配置里的「登录私钥」指向新文件。
+///
+/// 同时更新 `identity_fingerprint`：这个字段要跟着同步包走到别的设备，
+/// 只改路径的话，手机拿到的还是旧指纹，会去找已经废弃的那把钥匙。
 async fn switch_host_identity(
     state: &AppState,
     session: &Arc<Session>,
     private_key_path: &str,
+    fingerprint: &str,
 ) -> Result<SwitchOutcome, ApiError> {
     if private_key_path.is_empty() {
         return Ok(SwitchOutcome::skipped("没有本地私钥文件路径"));
@@ -327,6 +331,7 @@ async fn switch_host_identity(
             port: Some(host.port),
             username: Some(host.username),
             identity_file: Some(private_key_path.to_string()),
+            identity_fingerprint: Some(fingerprint.to_string()),
             remote_path: Some(host.remote_path),
         })
         .map_err(|e| ApiError::bad(e.to_string()))?;
@@ -388,7 +393,7 @@ async fn maybe_switch_identity(
         }
     }
 
-    let info = switch_host_identity(state, session, &path).await?;
+    let info = switch_host_identity(state, session, &path, &fresh.fingerprint).await?;
     if info.switched {
         steps.push(format!(
             "已把本机登录密钥切换为新钥匙：{}",
@@ -605,7 +610,7 @@ pub async fn replace_key(
     // 旧公钥已从服务器删掉，本机配置还指着旧私钥会导致下次登录失败
     let mut sw = SwitchOutcome::skipped("新密钥在本地没有对应私钥文件");
     if let Some(path) = fresh.private_key_path.clone() {
-        sw = switch_host_identity(state, session, &path).await?;
+        sw = switch_host_identity(state, session, &path, &fresh.fingerprint).await?;
         if sw.switched {
             steps.push(format!(
                 "已把本机登录密钥切换为新钥匙：{}",

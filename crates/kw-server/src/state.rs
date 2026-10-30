@@ -26,6 +26,9 @@ pub struct AppState {
     pub version: String,
     pub auto_cookie: bool,
     pub scan_cache_ms: u64,
+    /// 本地密钥库目录。同步包只带指纹不带路径，连接时按指纹在这里找私钥。
+    /// 桌面端与手机端都用 `<data_dir>/keys`，正好和 FFI 侧一致。
+    pub keys_dir: PathBuf,
     /// 设备码登录的中间态：只有 device_code，不落盘、不进日志，重启即失效。
     pub pending_login: Mutex<Option<String>>,
     scan_cache: Mutex<HashMap<String, (Instant, ScanResult)>>,
@@ -45,6 +48,7 @@ impl AppState {
             .and_then(|v| v.parse::<u64>().ok())
             .unwrap_or(0);
         let auto_cookie = std::env::var("KW_NO_AUTO_COOKIE").ok().as_deref() != Some("1");
+        let keys_dir = store.dir().join("keys");
         Self {
             token,
             port,
@@ -55,6 +59,7 @@ impl AppState {
             version: version.into(),
             auto_cookie,
             scan_cache_ms,
+            keys_dir,
             pending_login: Mutex::new(None),
             scan_cache: Mutex::new(HashMap::new()),
         }

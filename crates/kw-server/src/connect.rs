@@ -9,7 +9,9 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use kw_core::Secret;
+use kw_keys::find_private_key_by_fingerprint;
 use kw_ssh::session::{connect, SshConfig};
+use kw_store::Host;
 
 use crate::error::ApiError;
 use crate::sessions::{fingerprint_of_private_key, RemoteState, Session, Target};
@@ -35,6 +37,27 @@ pub(crate) fn non_empty(v: &Option<String>) -> Option<&str> {
     v.as_deref().map(str::trim).filter(|s| !s.is_empty())
 }
 
+/// 决定这次连接用哪个私钥文件。
+///
+/// 优先级：请求里显式指定 → 主机在本机存的路径 → 按主机记的指纹去密钥库找。
+/// 最后一条是跨设备同步的关键：同步包只带指纹（路径是各设备自己的），
+/// 手机拿到电脑的主机配置后，靠指纹在本地密钥包里找到同一把钥匙。
+fn resolve_identity_file(state: &AppState, host: &Host, requested: Option<&str>) -> String {
+    if let Some(path) = requested.map(str::trim).filter(|s| !s.is_empty()) {
+        return path.to_string();
+    }
+    if !host.identity_file.trim().is_empty() {
+        return host.identity_file.clone();
+    }
+    let fp = host.identity_fingerprint.trim();
+    if fp.is_empty() {
+        return String::new();
+    }
+    find_private_key_by_fingerprint(&state.keys_dir, fp, 3)
+        .map(|entry| entry.path)
+        .unwrap_or_default()
+}
+
 /// 保存过的主机按 id 取；否则用请求里的字段拼一个「临时连接」。
 fn resolve_target(state: &AppState, body: &ConnectBody) -> Result<Target, ApiError> {
     let target = if let Some(id) = non_empty(&body.host_id) {
@@ -45,10 +68,7 @@ fn resolve_target(state: &AppState, body: &ConnectBody) -> Result<Target, ApiErr
             .find(|h| h.id == id)
             .ok_or_else(|| ApiError::bad("主机配置不存在，请刷新页面"))?;
         // 凭据弹窗是在已保存主机的基础上重连：必须保留 id，否则会话变成「临时连接」
-        let identity_file = body
-            .identity_file
-            .clone()
-            .unwrap_or_else(|| host.identity_file.clone());
+        let identity_file = resolve_identity_file(state, &host, body.identity_file.as_deref());
         Target {
             id: host.id,
             name: host.name,

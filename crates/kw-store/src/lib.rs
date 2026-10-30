@@ -66,7 +66,12 @@ pub struct Host {
     #[serde(default = "default_port")]
     pub port: u16,
     pub username: String,
+    /// 本机私钥路径。只对这台设备有意义，同步时不会覆盖对方的值。
     pub identity_file: String,
+    /// 首选私钥的指纹（`SHA256:...`）。跨设备有效：本机 `identity_file`
+    /// 不可用时按它去本地密钥库里找同一把钥匙。
+    #[serde(default)]
+    pub identity_fingerprint: String,
     pub remote_path: String,
     pub created_at: u64,
     pub updated_at: u64,
@@ -84,6 +89,7 @@ impl Default for Host {
             port: 22,
             username: String::new(),
             identity_file: String::new(),
+            identity_fingerprint: String::new(),
             remote_path: String::new(),
             created_at: 0,
             updated_at: 0,
@@ -117,6 +123,8 @@ pub struct HostPatch {
     pub port: Option<u16>,
     pub username: Option<String>,
     pub identity_file: Option<String>,
+    /// 不传 = 保留原值（前端表单不感知这个字段，别让一次编辑把它清掉）
+    pub identity_fingerprint: Option<String>,
     pub remote_path: Option<String>,
 }
 
@@ -276,6 +284,12 @@ impl Store {
                 .unwrap_or_default()
                 .trim()
                 .to_string(),
+            identity_fingerprint: patch
+                .identity_fingerprint
+                .clone()
+                .unwrap_or_default()
+                .trim()
+                .to_string(),
             remote_path: patch
                 .remote_path
                 .clone()
@@ -300,6 +314,11 @@ impl Store {
                 } else {
                     now_ms()
                 };
+                // 指纹由同步包带过来，前端表单并不感知它 —— 传空即「保持原值」，
+                // 否则用户在桌面改一次主机名就会把跨设备的私钥关联抹掉
+                if host.identity_fingerprint.is_empty() {
+                    host.identity_fingerprint = cfg.hosts[idx].identity_fingerprint.clone();
+                }
                 cfg.hosts[idx] = host.clone();
             }
             None => {

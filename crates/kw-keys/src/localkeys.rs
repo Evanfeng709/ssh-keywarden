@@ -112,6 +112,25 @@ fn mtime_ms(meta: &fs::Metadata) -> u64 {
         .unwrap_or(0)
 }
 
+/// 在密钥库里按指纹找一把私钥。
+///
+/// 跨设备同步时包里只带指纹、不带路径（路径是各设备自己的），
+/// 连接前用它在本地把指纹还原成一个真实文件。
+pub fn find_private_key_by_fingerprint(
+    root: &Path,
+    fingerprint: &str,
+    max_depth: usize,
+) -> Option<LocalKeyEntry> {
+    let fp = fingerprint.trim();
+    if fp.is_empty() {
+        return None;
+    }
+    scan_keys(root, max_depth)
+        .entries
+        .into_iter()
+        .find(|e| e.kind == LocalKeyKind::Private && e.fingerprint == fp)
+}
+
 /// 扫描目录（递归，限深度）。
 pub fn scan_keys(root: &Path, max_depth: usize) -> ScanResult {
     let mut result = ScanResult::default();

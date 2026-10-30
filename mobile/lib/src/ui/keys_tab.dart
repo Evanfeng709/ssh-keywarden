@@ -806,6 +806,8 @@ class _KeysTabState extends State<KeysTab> {
   Future<void> _addKey() async {
     final comment = TextEditingController();
     final pass = TextEditingController();
+    final pasted = TextEditingController();
+    var mode = 'generate';
     var algorithm = 'ed25519';
     var switchToNew = false;
 
@@ -818,22 +820,41 @@ class _KeysTabState extends State<KeysTab> {
             child: Column(
               mainAxisSize: MainAxisSize.min,
               children: [
-                DropdownButtonFormField<String>(
-                  initialValue: algorithm,
-                  decoration: InputDecoration(labelText: '算法'),
-                  dropdownColor: KwColors.bgElev,
-                  items: [
-                    DropdownMenuItem(
-                      value: 'ed25519',
-                      child: Text('Ed25519（推荐）'),
-                    ),
-                    DropdownMenuItem(value: 'rsa', child: Text('RSA 3072')),
+                SegmentedButton<String>(
+                  segments: const [
+                    ButtonSegment(value: 'generate', label: Text('生成新密钥')),
+                    ButtonSegment(value: 'paste', label: Text('粘贴公钥')),
                   ],
-                  onChanged: (v) => setLocal(() => algorithm = v ?? 'ed25519'),
+                  selected: {mode},
+                  onSelectionChanged: (v) => setLocal(() => mode = v.first),
                 ),
-                SizedBox(height: 12),
-                field(comment, '注释', hint: 'mobile@phone'),
-                field(pass, 'passphrase（可选）', obscure: true),
+                SizedBox(height: 16),
+                if (mode == 'paste')
+                  field(
+                    pasted,
+                    '公钥内容',
+                    hint: 'ssh-ed25519 AAAA... 备注',
+                    maxLines: 4,
+                    helper: '电脑上同步过来的那把钥匙可以直接粘进来，不必重新生成',
+                  )
+                else ...[
+                  DropdownButtonFormField<String>(
+                    initialValue: algorithm,
+                    decoration: InputDecoration(labelText: '算法'),
+                    dropdownColor: KwColors.bgElev,
+                    items: [
+                      DropdownMenuItem(
+                        value: 'ed25519',
+                        child: Text('Ed25519（推荐）'),
+                      ),
+                      DropdownMenuItem(value: 'rsa', child: Text('RSA 3072')),
+                    ],
+                    onChanged: (v) => setLocal(() => algorithm = v ?? 'ed25519'),
+                  ),
+                  SizedBox(height: 12),
+                  field(comment, '注释', hint: 'mobile@phone'),
+                  field(pass, 'passphrase（可选）', obscure: true),
+                ],
                 CheckboxListTile(
                   contentPadding: EdgeInsets.zero,
                   value: switchToNew,
@@ -857,8 +878,11 @@ class _KeysTabState extends State<KeysTab> {
               child: Text('取消'),
             ),
             FilledButton(
-              onPressed: () => Navigator.pop(ctx, true),
-              child: Text('生成并写入'),
+              onPressed: () {
+                if (mode == 'paste' && pasted.text.trim().isEmpty) return;
+                Navigator.pop(ctx, true);
+              },
+              child: Text(mode == 'paste' ? '写入服务器' : '生成并写入'),
             ),
           ],
         ),
@@ -866,15 +890,19 @@ class _KeysTabState extends State<KeysTab> {
     );
     final c = comment.text;
     final p = pass.text;
+    final pastedText = pasted.text.trim();
     comment.dispose();
     pass.dispose();
+    pasted.dispose();
     if (submitted != true || !mounted) return;
 
     try {
       final data = await state.addKey(
+        mode: mode,
         algorithm: algorithm,
         comment: c,
         passphrase: p.isEmpty ? null : p,
+        publicKey: pastedText,
         switchToNew: switchToNew,
       );
       if (mounted) _showSteps('新增密钥', data);

@@ -540,6 +540,7 @@ pub async fn sync_now(
         .await
         .map_err(|e| format!("读取 OneDrive 同步文件失败：{e}"))?;
 
+    let keys_dir = store.dir().join("keys");
     let mut report = ImportReport::default();
     let pulled = match resp.status() {
         StatusCode::OK => {
@@ -553,6 +554,7 @@ pub async fn sync_now(
                 report = import_bundle(
                     store,
                     known_hosts,
+                    &keys_dir,
                     &text,
                     Some(pass),
                     &ImportOptions {
@@ -579,7 +581,8 @@ pub async fn sync_now(
         });
     }
 
-    let bundle = export_bundle(store, known_hosts, Some(pass))?;
+    // 微软账号同步一定带口令（没有口令根本走不到这里），所以私钥随包一起走
+    let bundle = export_bundle(store, known_hosts, &keys_dir, true, Some(pass))?;
     let put = client
         .put(&url)
         .bearer_auth(&auth.access_token)

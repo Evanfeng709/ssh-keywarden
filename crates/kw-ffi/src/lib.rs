@@ -772,6 +772,7 @@ mod tests {
                 port: Some(22),
                 username: Some("root".into()),
                 identity_file: Some("/不存在的路径".into()),
+                identity_fingerprint: None,
                 remote_path: None,
             })
             .unwrap();
@@ -783,11 +784,19 @@ mod tests {
             )
             .unwrap();
 
-        let plain = sync::export_bundle(&a.state.store, &a.state.known_hosts, None).unwrap();
+        let plain = sync::export_bundle(
+            &a.state.store,
+            &a.state.known_hosts,
+            &a.state.keys_dir,
+            false,
+            None,
+        )
+        .unwrap();
         let b = MobileEngine::new(dst.path()).unwrap();
         let counts = sync::import_bundle(
             &b.state.store,
             &b.state.known_hosts,
+            &b.state.keys_dir,
             &plain,
             None,
             &sync::ImportOptions::default(),
@@ -801,6 +810,7 @@ mod tests {
         let again = sync::import_bundle(
             &b.state.store,
             &b.state.known_hosts,
+            &b.state.keys_dir,
             &plain,
             None,
             &sync::ImportOptions::default(),
@@ -824,13 +834,19 @@ mod tests {
                 port: Some(2222),
                 username: Some("deploy".into()),
                 identity_file: None,
+                identity_fingerprint: None,
                 remote_path: None,
             })
             .unwrap();
 
-        let text =
-            sync::export_bundle(&a.state.store, &a.state.known_hosts, Some("correct horse"))
-                .unwrap();
+        let text = sync::export_bundle(
+            &a.state.store,
+            &a.state.known_hosts,
+            &a.state.keys_dir,
+            false,
+            Some("correct horse"),
+        )
+        .unwrap();
         assert!(text.contains("\"encrypted\":true"));
         assert!(!text.contains("example.com"));
 
@@ -839,6 +855,7 @@ mod tests {
             sync::import_bundle(
                 &b.state.store,
                 &b.state.known_hosts,
+                &b.state.keys_dir,
                 &text,
                 pass,
                 &sync::ImportOptions::default(),
@@ -863,6 +880,7 @@ mod tests {
                 port: Some(2222),
                 username: Some("root".into()),
                 identity_file: Some(String::new()),
+                identity_fingerprint: None,
                 remote_path: None,
             })
             .unwrap();

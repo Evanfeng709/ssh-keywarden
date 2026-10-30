@@ -166,22 +166,35 @@ class AppState extends ChangeNotifier {
     }
   }
 
+  /// 新增密钥到服务器。
+  ///
+  /// `mode` 为 `generate` 时在手机上现生成一对；为 `paste` 时把已有公钥
+  /// （通常是从电脑同步过来的那把）直接追加进去 —— 换设备时不必重新造钥匙。
   Future<Map<String, dynamic>> addKey({
+    String mode = 'generate',
     String algorithm = 'ed25519',
     String comment = '',
     String? passphrase,
+    String publicKey = '',
     bool switchToNew = false,
   }) => _run(() async {
     final current = session;
     if (current == null) throw KwException('尚未连接服务器');
-    final data = await _engine.call('addKey', {
+    final body = <String, dynamic>{
       'sid': current.sid,
-      'mode': 'generate',
-      'generator': algorithm,
-      'comment': comment,
-      if (passphrase != null && passphrase.isNotEmpty) 'passphrase': passphrase,
+      'mode': mode,
       'switchToNew': switchToNew,
-    });
+    };
+    if (mode == 'paste') {
+      body['publicKey'] = publicKey;
+    } else {
+      body['generator'] = algorithm;
+      body['comment'] = comment;
+      if (passphrase != null && passphrase.isNotEmpty) {
+        body['passphrase'] = passphrase;
+      }
+    }
+    final data = await _engine.call('addKey', body);
     _applySession(data);
     await _reloadQuiet();
     return data;

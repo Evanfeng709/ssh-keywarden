@@ -13,6 +13,7 @@ pub use authorized::{
     append_key, parse_authorized_keys, render_without, AppendError, AppendOutcome, AuthorizedItem,
     AuthorizedKeys, ItemData, ItemKind,
 };
+pub use localkeys::{find_private_key_by_fingerprint, scan_keys, LocalKeyEntry, LocalKeyKind};
 pub use keygen::{
     fingerprint_of_blob, generate_ed25519, generate_rsa, inspect_private_key, load_private_key,
     normalize_comment, parse_public_key_line, parse_public_keys, private_key_openssh, GeneratedKey,
