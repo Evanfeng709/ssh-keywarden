@@ -14,8 +14,6 @@ base64.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
 russh.workspace = true
-# russh 默认用 aws-lc-rs；预编译汇编省掉本机 NASM 依赖
-aws-lc-rs = { version = "1", features = ["prebuilt-nasm"] }
 tokio.workspace = true
 async-trait = "0.1"
 

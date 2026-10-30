@@ -31,7 +31,10 @@ rsa = { version = "0.9.10", features = ["pem"] }
 rand = "0.8"
 zeroize = { version = "1.9", features = ["derive"] }
 uuid = { version = "1", features = ["v4"] }
-russh = "0.65"
+# 加密后端固定用 ring，不用 russh 默认的 aws-lc-rs ——
+# aws-lc 交叉编译到 Android 时要现场跑 CMake（还需要 perl/go），本机没有会直接卡死；
+# ring 只需要 NDK 自带的 clang 汇编，Windows 端用 MSVC 的 ml64 也能过。
+russh = { version = "0.65", default-features = false, features = ["ring", "flate2", "rsa"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "io-util", "net", "signal"] }
 
 [profile.release]
