@@ -698,6 +698,30 @@ fn async_call(result: Result<Value, Value>) -> Value {
 mod tests {
     use super::*;
 
+    /// 手机端的版本号是独立的一套（pubspec.yaml → gradle 的 versionName/versionCode），
+    /// 不会跟着 workspace 的 Cargo.toml 自动变。漏改过一次：Rust 侧 0.4.0、APK 还是 0.3.0，
+    /// 而且 versionCode 没涨，某些 ROM 会拒绝安装「相同版本」。
+    #[test]
+    fn mobile_pubspec_version_matches_workspace() {
+        let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let pubspec = manifest.join("../../mobile/pubspec.yaml");
+        let Ok(text) = std::fs::read_to_string(&pubspec) else {
+            eprintln!("跳过：读不到 {}", pubspec.display());
+            return;
+        };
+        let line = text
+            .lines()
+            .find(|l| l.trim_start().starts_with("version:"))
+            .expect("pubspec.yaml 里应当有 version:");
+        let raw = line.split(':').nth(1).expect("version 行格式异常").trim();
+        let semver = raw.split('+').next().unwrap_or(raw);
+        assert_eq!(
+            semver,
+            env!("CARGO_PKG_VERSION"),
+            "mobile/pubspec.yaml 的版本（{raw}）要与 workspace 版本一致；改版本号时别忘了 +build 也要涨"
+        );
+    }
+
     #[test]
     fn raw_connect_json_uses_typed_credentials() {
         let dir = tempfile::tempdir().unwrap();

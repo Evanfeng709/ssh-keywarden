@@ -1,9 +1,12 @@
 # CHANGELOG
 
-> 版本号规则：语义化版本（semver），当前 `0.3.1`。
-> 单一来源是根 `Cargo.toml` 的 `[workspace.package].version`；
-> `crates/kw-desktop/tauri.conf.json` 的 `version` 与本文件标题必须同步，
-> 由 `kw-desktop` 的单测 `version_matches_tauri_conf_and_changelog` 兜底。
+> 版本号规则：语义化版本（semver），当前 `0.4.0`。
+> 单一来源是根 `Cargo.toml` 的 `[workspace.package].version`，三处必须同步：
+> `crates/kw-desktop/tauri.conf.json`（由 `kw-desktop` 单测
+> `version_matches_tauri_conf_and_changelog` 兜底）与 `mobile/pubspec.yaml`
+> （由 `kw-ffi` 的 `mobile_pubspec_version_matches_workspace` 兜底）。
+> **手机端的 `+build` 是 Android 的 versionCode，必须单调递增** —— 只涨 semver 不涨 build，
+> 某些 ROM 会把新包当成「相同版本」拒绝安装。
 
 ## v0.4.0 — 2026-10-30
 
