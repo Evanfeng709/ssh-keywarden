@@ -134,7 +134,8 @@ async function main() {
     check('页面有尺寸', boot.inner[0] > 900 && boot.inner[1] > 600, `${boot.inner.join('x')}`);
     check('识别为桌面版', boot.desktopClass && boot.bridge);
     check('主题来自数据目录', boot.theme === 'graphite', boot.theme);
-    check('版本号已渲染', /^\d+\.\d+\.\d+/.test(boot.version), boot.version);
+    // 页面展示的是 v2026.10.30.1 这种形态（带 v、点号分段），导航栏允许 v 前缀
+    check('版本号已渲染', /^v?\d+\.\d+\.\d+/.test(boot.version), boot.version);
     check('顶栏不溢出', !boot.overflow);
     check('顶栏可拖动', boot.drag === 'deep');
     check('窗口按钮齐全', boot.winControls === 3);

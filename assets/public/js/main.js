@@ -188,7 +188,8 @@ function bind() {
 /** 重新拉一遍整页状态：首次启动和同步完成后都走这里 */
 async function reloadAll() {
   const s = await api('/api/state');
-  if (s.version) $('version').textContent = s.version;
+  // 后端报的是 semver 形态（2026.10.30-1，Cargo 只认三段），展示统一成 v2026.10.30.1
+  if (s.version) $('version').textContent = 'v' + String(s.version).replace(/-/g, '.');
   state.hosts = s.hosts;
   state.settings = s.settings;
   state.keyNotes = s.keyNotes || {};
