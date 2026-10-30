@@ -3,6 +3,91 @@
 > 版本号规则：`v<日期>.<当天第几次更新>`，例如 `v2026.10.19.4` 表示 2026-10-19 当天第 4 次更新。
 > 单一来源是 `src/version.js`；`package.json` 的 `version` 因 semver 限制写成 `2026.10.19-4`（分隔符不同，指同一个版本）。
 
+## v2026.10.28.5 — 2026-10-28
+
+### 修复
+
+- **筛选状态下点「全选」会清掉筛选外的勾选**：`setAllSelected()` 开头那句 `state.selected.clear()`
+  会把被搜索/筛选挡掉的已选钥匙一起抹掉，跟界面上的「已选 n · m 条在筛选外」自相矛盾 ——
+  那套机制存在的意义就是「筛选外仍然保留选中」。
+  改为只对当前可见的行做增删；跨会话的清空本来就由 `connect.js` 在连接时负责，不受影响。
+
+### 工程
+
+- **`src/knownhosts.js` 的 `writeAll()` 补上 `chmodSync(tmp, 0o600)`**：
+  和 `src/store.js` 的 `writeJsonAtomic()` 对齐 —— `writeFileSync` 的 `mode` 只在新建文件时生效，
+  覆盖上次崩溃残留的 `.tmp` 时要再补一刀。三个核心数据文件（`config.json` / `key-notes.json` / `known_hosts.json`）
+  的落盘权限逻辑至此完全一致。
+
+## v2026.10.28.4 — 2026-10-28
+
+### 修复
+
+- **同一会话的并发写会互相覆盖**：`addKey` / `replaceKey` / `deleteKeys` / `restoreBackup` 都是
+  「读 → 改 → 备份 → 写 → 回读」的多步流程，两个请求交织时后一个读到的是旧内容，会把前一个的修改整个盖掉；
+  备份名又是秒级时间戳，同一秒内两次写还会互相覆盖 `.bak`。
+  新增 `withSessionLock()`（Promise 链、FIFO、不引第三方库），`/api/add`、`/api/replace`、`/api/delete`、
+  `/api/backups/restore`、`/api/sshd/password-auth`、`/api/refresh` 六个入口全部串行化。
+- **`commitKeys` 里 `mkdir -p` 裸拼 shell**：`mkdir -p '${dir}'` 是全项目唯一没过 `ssh.quote()` 的远端路径，
+  自定义 `remotePath` 里带一个单引号就能把命令截断。改为 `ssh.assertSafePath()` + `ssh.quote()`。
+- **`sshd -t` 的错误输出写死在 `/tmp/.kk_sshd_check`**：改成 `ERR_LOG=$(mktemp)` 并在成功/回滚两条路径上都清理。
+  开了 `fs.protected_regular` 的发行版上，这个固定路径被别的用户占住会让重定向失败，进而误触发回滚。
+- **`package-lock.json` 的根包 engines 没跟上**：上一版把 `package.json` 提到 `>=22.12.0` 时锁文件仍是 `>=18`
+  （`npm install` 才会同步，手动改漏了）。由本轮新增的断言抓到。
+
+### 优化
+
+- **每次写操作少跑 2–3 次 SSH exec**：`commitKeys()` 写完本来就会回读一次，但调用方普遍丢弃返回值又重读一遍。
+  现在直接复用：`addKey` 从 3 次读降到 1 次，`replaceKey` / `deleteKeys` / `restoreBackup` 各降 1–2 次。
+  跨国 VPS 上一次 exec 几百毫秒，感知明显。
+- **本地密钥扫描先嗅探文件头部**：`scanKeys` 原来只要文件小于 128 KB 就整份 `readFileSync`，
+  密钥目录里混着文档/日志/截图时全是白读（OneDrive 按需文件还会触发云端拉取）。
+  现在只读开头 4KB 判断，确认像密钥才整份读；头部只有注释的少数情况仍退回整份读。
+
+### 工程
+
+- `start.cmd` 的 Node 版本提示从 18 同步到 22.12，与 `engines` 对齐。
+- `tests/run.js` 的版本一致性用例新增 `engines` 断言（`lock.packages[''].engines` 必须等于 `pkg.engines`）——
+  加完立刻抓到上面那条锁文件不同步。
+
+## v2026.10.28.3 — 2026-10-28
+
+### 修复
+
+- **窗口可能开在屏幕外**：上次把窗口拖到外接副屏后关掉、下次拔了屏再启动，窗口会落在可视区之外。
+  窗口是无边框的，没有系统标题栏可拖，用户基本救不回来。现在按「最贴近的显示器」把坐标夹回它的 workArea，
+  分辨率变小（4K 屏换笔记本）时也会一并收窄。
+- **桌面状态文件改为原子写**：`theme.json` / `window-state.json` / `ui.json` 原先直接 `writeFileSync`，
+  退出瞬间被强杀或断电会留下 0 字节坏文件。现在统一走 `.tmp + rename`，和 `src/store.js` 处理核心数据同一套做法。
+
+### 优化
+
+- **确认弹窗不再用系统原生 confirm**：原先 7 处（强制删旧钥匙、批量删密钥、强制删除当前连接钥匙、
+  恢复备份、删服务器配置、两处切换登录方式）在无边框窗口里弹出系统级方框，与六套主题割裂，
+  且同步阻塞渲染线程 —— 终端正在满屏输出时会卡帧。改用 `core.js` 新增的 `confirmModal()`，返回 `Promise<boolean>`，
+  危险操作用红色按钮，Esc / 点遮罩 / 右上角 × 一律按取消处理。
+- **登录方式徽章不再每行重复**：`[仅密钥登录]` 是服务器级状态，原先在每一行的状态列各渲染一次，
+  20 把钥匙就是 20 个一模一样的按钮。现在只挂在「服务器密钥」标题右侧（`#sshdBadgeSlot`），
+  行内状态列专注表达「这一把钥匙」（● 本次连接 / 重复）。
+  > 位置沿革：标题旁（.9 之前）→ 状态列表头（.13）→ 行内状态列（.14）→ 标题旁（本条）。
+  > 这次不是简单回退：表头方案会和「分隔条对齐状态二字」的测量冲突，行内方案则重复 N 次。
+- **全选不再逐行触发重绘**：`#checkAll` 原先遍历每行 checkbox 逐个 `dispatchEvent('change')`，
+  每行监听器都会跑一次 `updateSelectionUi()`（里面两次全表 `querySelectorAll`），
+  N 把钥匙就是 2N 次全表查询。现在改为 `setAllSelected()` 一次批量改状态与行样式，只重算一次。
+- **剪贴板通道统一**：`readClipboardText` / `writeClipboardText` 从 `terminal.js` 下沉到 `core.js`
+  （桌面版走主进程 IPC、网页版回退 `navigator.clipboard`），`keys.js` 里四处硬编码的 `navigator.clipboard.writeText`
+  全部换掉 —— 桌面版从此也走不受页面权限限制的通道。
+- **公钥后缀截取抽成 `stripPubSuffix()`**：`keys.js` 与 `keyform.js` 各自写的 `.replace(/\.pub$/i, '')` 合并到 `core.js`，
+  以后加命名规则只改一处。
+
+### 工程
+
+- **`engines.node` 提到 `>=22.12.0`**：`electron@45`、`@electron/get`、`@electron/rebuild`、`@electron-internal/extract-zip`
+  在锁文件里都声明了这个下限，原来写的 `>=18` 与实际依赖不符（npm 默认 `engine-strict=false`，
+  所以只是 EBADENGINE 警告，不会直接失败，但声明本身是错的）。CI 矩阵同步从 `[20, 22]` 改为 `[22, 24]`。
+- **preload 的 IPC 订阅返回解绑函数**：`windowControls.onMaximizeChange` / `systemTheme.onChange` 现在返回
+  `() => ipcRenderer.removeListener(...)`，热重载或局部重新初始化时不会叠加监听。
+
 ## v2026.10.28.2 — 2026-10-28
 
 ### 新增

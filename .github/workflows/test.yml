@@ -9,7 +9,10 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        node: [20, 22]
+        # 下界跟 package.json 的 engines 对齐：electron 45 的依赖链
+        # （electron / @electron/get / @electron/rebuild）都要求 node >=22.12.0，
+        # 在 node 20 上只会出 EBADENGINE 警告，测它没有意义。
+        node: [22, 24]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
