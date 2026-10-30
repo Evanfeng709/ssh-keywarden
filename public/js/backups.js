@@ -1,5 +1,5 @@
 'use strict';
-import { state, escapeHtml, shortFp, toast, logLine, openModal, closeModal, api } from './core.js';
+import { state, escapeHtml, shortFp, toast, logLine, openModal, closeModal, confirmModal, api } from './core.js';
 import { renderServer } from './keys.js';
 
 let backupModal = null;
@@ -156,7 +156,7 @@ async function openBackupsModal() {
         if (force) {
           lines.push('', '⚠ 当前登录钥匙不在备份里，恢复后下次连接会失败。');
         }
-        if (!confirm(lines.join('\n'))) return;
+        if (!(await confirmModal({ title: '恢复备份', message: lines.join('\n'), danger: force, okText: '恢复' }))) return;
 
         restoreBusy = true;
         const btn = detailEl.querySelector('#bakRestore');

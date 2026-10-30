@@ -1,5 +1,5 @@
 'use strict';
-import { $, state, escapeHtml, shortFp, toast, api } from './core.js';
+import { $, state, escapeHtml, shortFp, toast, api, writeClipboardText, stripPubSuffix } from './core.js';
 import { openReplaceModal, askDelete } from './actions.js';
 import { sshdBadgeHtml } from './sshd.js';
 
@@ -110,12 +110,8 @@ function leafOf(dir) {
 }
 
 async function copyLocalText(text, label) {
-  try {
-    await navigator.clipboard.writeText(text);
-    toast(`${label}已复制`, 'ok', 1600);
-  } catch {
-    toast(text, 'info', 5000);
-  }
+  if (await writeClipboardText(text)) toast(`${label}已复制`, 'ok', 1600);
+  else toast(text, 'info', 5000);
 }
 
 function localRow(entry) {
@@ -283,7 +279,7 @@ function noteOf(fingerprint) {
 function isLoginKey(entry, identityFile) {
   if (!entry || !identityFile) return false;
   const norm = (p) => String(p).replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
-  return norm(entry.path.replace(/\.pub$/i, '')) === norm(identityFile);
+  return norm(stripPubSuffix(entry.path)) === norm(identityFile);
 }
 
 /* ------------------------------------------------------------------ */
@@ -368,24 +364,16 @@ function renderServerMeta(s) {
   const copyBtn = el.querySelector('[data-copy-host]');
   if (copyBtn) {
     copyBtn.addEventListener('click', async () => {
-      try {
-        await navigator.clipboard.writeText(host);
-        toast('登录信息已复制', 'ok', 1500);
-      } catch {
-        toast(host, 'info', 4000);
-      }
+      if (await writeClipboardText(host)) toast('登录信息已复制', 'ok', 1500);
+      else toast(host, 'info', 4000);
     });
   }
 
   const pathBtn = el.querySelector('.meta-path');
   if (pathBtn) {
     pathBtn.addEventListener('click', async () => {
-      try {
-        await navigator.clipboard.writeText(path);
-        toast('路径已复制', 'ok', 1500);
-      } catch {
-        toast(path, 'info', 4000);
-      }
+      if (await writeClipboardText(path)) toast('路径已复制', 'ok', 1500);
+      else toast(path, 'info', 4000);
     });
   }
 }
@@ -529,6 +517,14 @@ function startNoteEdit(cell, fingerprint) {
   });
 }
 
+/** 登录方式是服务器级状态：挂在面板标题上，行内状态列只表达「这一把钥匙」 */
+function renderSshdHeadBadge() {
+  const slot = $('sshdBadgeSlot');
+  if (!slot) return;
+  /* 纯终端模式既不读也不改 sshd，别把上一个模式的状态留在标题上 */
+  slot.innerHTML = state.mode === 'term' ? '' : sshdBadgeHtml();
+}
+
 function renderServer() {
   const s = state.session;
   const body = $('keyBody');
@@ -540,6 +536,7 @@ function renderServer() {
     $('serverMeta').textContent = '未连接';
     setConnected(false);
     state.sshd = null;
+    renderSshdHeadBadge();
     $('keyTools').classList.add('hidden');
     empty.classList.remove('hidden');
     empty.querySelector('p').textContent = '还没有连接服务器';
@@ -557,6 +554,7 @@ function renderServer() {
 
   empty.classList.add('hidden');
   setConnected(true);
+  renderSshdHeadBadge();
 
   const usedFp = s.usedKeyFp;
   // 徽章代表「主机配置里的登录私钥」，也就是下次连接会用的那把；
@@ -689,7 +687,7 @@ function renderServer() {
       <td>
         <div class="fp" data-copy="${escapeHtml(item.fingerprint)}" title="点击复制完整指纹">${escapeHtml(item.fingerprint || '—')}</div>
       </td>
-      <td class="status-cell">${sshdBadgeHtml()}${statusBits.join(' ') || (state.sshd && state.sshd.available ? '' : '<span class="dash">—</span>')}</td>
+      <td class="status-cell">${statusBits.join(' ') || '<span class="dash">—</span>'}</td>
       <td class="comment-cell">
         <div class="comment-line">
           <span class="comment-text">${escapeHtml(item.comment || '(无注释)')}</span>
@@ -723,12 +721,8 @@ function renderServer() {
     });
 
     tr.querySelector('.fp').addEventListener('click', async () => {
-      try {
-        await navigator.clipboard.writeText(item.fingerprint);
-        toast('指纹已复制', 'ok', 1600);
-      } catch {
-        toast(item.fingerprint, 'info', 4000);
-      }
+      if (await writeClipboardText(item.fingerprint)) toast('指纹已复制', 'ok', 1600);
+      else toast(item.fingerprint, 'info', 4000);
     });
 
     tr.querySelector('[data-replace]').addEventListener('click', () => openReplaceModal(item.fingerprint));
@@ -750,6 +744,25 @@ function renderNotice(text, kind = '') {
   }
   el.className = `notice ${kind}`;
   el.textContent = text;
+}
+
+/**
+ * 全选 / 全不选：一次批量改复选框、行样式和 state.selected，最后只重算一次选择 UI。
+ * 原来靠逐行 dispatchEvent('change')，N 把钥匙会让 updateSelectionUi 跑 N 次
+ * （它每次都做两次全表 querySelectorAll），几十上百把时白烧一遍 DOM 查询。
+ *
+ * 只作用于当前可见的行：被搜索/筛选挡掉的钥匙要保留原来的勾选状态
+ * （界面上的「已选 n · m 条在筛选外」就是为这个准备的），切会话时由 connect.js 统一清空。
+ */
+function setAllSelected(on) {
+  const boxes = document.querySelectorAll('#keyBody input[type="checkbox"]');
+  boxes.forEach((cb) => {
+    cb.checked = on;
+    cb.closest('tr').classList.toggle('selected', on);
+    if (on) state.selected.add(cb.dataset.fp);
+    else state.selected.delete(cb.dataset.fp);
+  });
+  updateSelectionUi();
 }
 
 function updateSelectionUi() {
@@ -779,4 +792,5 @@ export {
   renderServer,
   renderNotice,
   updateSelectionUi,
+  setAllSelected,
 };

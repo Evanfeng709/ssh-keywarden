@@ -25,7 +25,8 @@ function setMode(mode, { persist = true } = {}) {
     btn.classList.toggle('on', btn.dataset.mode === mode);
     btn.setAttribute('aria-pressed', String(btn.dataset.mode === mode));
   }
-  document.querySelector('.server-panel .panel-head h2').textContent = mode === 'term' ? 'SSH 终端' : '服务器密钥';
+  // 只改标题文字本身：h2 里还挂着登录方式徽章的槽位，整体 textContent 会把它冲掉
+  $('serverPanelTitle').textContent = mode === 'term' ? 'SSH 终端' : '服务器密钥';
   if (mode === 'term' && $('layout').classList.contains('local-open')) $('btnLocal').click();
   renderServer();
   if (mode === 'term' && state.session) openTerminal();

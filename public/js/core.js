@@ -92,6 +92,50 @@ export function shortFp(fp) {
 }
 
 /* ------------------------------------------------------------------ */
+/* 剪贴板：桌面版走主进程 IPC（不依赖网页权限），网页版退回浏览器 API       */
+/* ------------------------------------------------------------------ */
+
+/** 读不到返回 null，和「剪贴板本来就是空的」区分开。 */
+export async function readClipboardText() {
+  const kw = window.keywarden;
+  if (kw && typeof kw.readClipboard === 'function') {
+    try {
+      return (await kw.readClipboard()) || '';
+    } catch {
+      /* 落到下面的网页通道 */
+    }
+  }
+  try {
+    return (await navigator.clipboard.readText()) || '';
+  } catch {
+    return null;
+  }
+}
+
+export async function writeClipboardText(text) {
+  const kw = window.keywarden;
+  if (kw && typeof kw.writeClipboard === 'function') {
+    try {
+      await kw.writeClipboard(text);
+      return true;
+    } catch {
+      /* 落到下面的网页通道 */
+    }
+  }
+  try {
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** 由公钥路径反推配对私钥路径：只认 `.pub` 后缀，一次改完到处生效 */
+export function stripPubSuffix(p) {
+  return String(p == null ? '' : p).replace(/\.pub$/i, '');
+}
+
+/* ------------------------------------------------------------------ */
 /* 弹窗                                                                */
 /* ------------------------------------------------------------------ */
 
@@ -134,6 +178,51 @@ export function closeModal(mask) {
     } catch {}
   }
   mask.remove();
+}
+
+/**
+ * 替代原生 confirm()。
+ * 原生弹窗在无边框窗口里是一块系统模样的方框，和主题完全割裂，还会同步阻塞渲染线程
+ * （终端正在大量输出时整个界面会卡住）；这里复用 openModal，返回 Promise<boolean>。
+ *
+ *   if (!(await confirmModal({ title: '删除密钥', message, danger: true }))) return;
+ */
+export function confirmModal({
+  title = '确认操作',
+  message = '',
+  danger = false,
+  okText = '确定',
+  cancelText = '取消',
+} = {}) {
+  return new Promise((resolve) => {
+    let settled = false;
+    const done = (value) => {
+      if (settled) return;
+      settled = true;
+      resolve(value);
+    };
+    openModal({
+      title,
+      width: '520px',
+      bodyHtml: `<div class="confirm-msg">${escapeHtml(message)}</div>`,
+      footHtml:
+        `<button type="button" data-confirm-cancel>${escapeHtml(cancelText)}</button>` +
+        `<button type="button" class="${danger ? 'danger' : 'primary'}" data-confirm-ok>${escapeHtml(okText)}</button>`,
+      onMount: (m) => {
+        m.querySelector('[data-confirm-ok]').addEventListener('click', () => {
+          done(true);
+          closeModal(m);
+        });
+        m.querySelector('[data-confirm-cancel]').addEventListener('click', () => {
+          done(false);
+          closeModal(m);
+        });
+        m.querySelector('[data-confirm-ok]').focus();
+      },
+      /* Esc、右上角 ×、点遮罩都会走到这里 —— 一律按取消处理 */
+      onClose: () => done(false),
+    });
+  });
 }
 
 document.addEventListener('keydown', (e) => {

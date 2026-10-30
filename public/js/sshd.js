@@ -1,5 +1,5 @@
 'use strict';
-import { state, escapeHtml, toast, logLine, api } from './core.js';
+import { state, escapeHtml, toast, logLine, confirmModal, api } from './core.js';
 import { renderServer } from './keys.js';
 
 /* ------------------------------------------------------------------ */
@@ -36,11 +36,14 @@ async function mountSshdBar(m, barId) {
     const toggle = bar.querySelector('#sshdToggle');
     toggle.addEventListener('change', async (ev) => {
       const enable = ev.target.checked;
-      const ok = confirm(
-        enable
+      const ok = await confirmModal({
+        title: enable ? '开启仅密钥登录' : '允许密码登录',
+        message: enable
           ? '开启后服务器只接受密钥登录，密码登录会被关闭。\n\n前提：你现在就是用密钥登录，且这把钥匙已确认可用。\n\n确定继续？'
-          : '重新允许密码登录？服务器安全性会下降。'
-      );
+          : '重新允许密码登录？服务器安全性会下降。',
+        danger: !enable,
+        okText: enable ? '开启' : '允许',
+      });
       if (!ok) {
         ev.target.checked = !enable;
         return;
@@ -134,11 +137,14 @@ async function toggleSshdFromBadge() {
     if (!st.available) return toast(st.reason, 'warn', 6000);
 
     const enable = !st.keyOnly;
-    const ok = confirm(
-      enable
+    const ok = await confirmModal({
+      title: enable ? '开启仅密钥登录' : '允许密码登录',
+      message: enable
         ? '开启「仅密钥登录」后，服务器将不再接受密码登录。\n\n前提：你现在就是用密钥登录，且这把钥匙已确认可用。\n\n确定继续？'
-        : '重新允许密码登录？服务器安全性会下降。'
-    );
+        : '重新允许密码登录？服务器安全性会下降。',
+      danger: !enable,
+      okText: enable ? '开启' : '允许',
+    });
     if (!ok) return;
 
     const r = await api('/api/sshd/password-auth', {

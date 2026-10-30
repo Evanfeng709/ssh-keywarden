@@ -1737,6 +1737,14 @@ body.mode-term .server-panel .term-panel {
   font-weight: 600;
 }
 .modal-body { padding: 16px 18px; overflow: auto; }
+/* 确认框正文：保留原 confirm() 文案里的空行与缩进 */
+.confirm-msg {
+  font-size: 12.5px;
+  line-height: 1.7;
+  color: var(--text);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
 .modal-foot {
   display: flex;
   justify-content: flex-end;

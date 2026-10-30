@@ -1,5 +1,5 @@
 'use strict';
-import { $, state, escapeHtml, shortFp, toast, logLine, openModal, closeModal, api } from './core.js';
+import { $, state, escapeHtml, shortFp, toast, logLine, openModal, closeModal, confirmModal, api } from './core.js';
 import { keySourceForm, applySwitchResult } from './keyform.js';
 import { mountSshdBar } from './sshd.js';
 import { renderServer, rescanLocal } from './keys.js';
@@ -134,7 +134,12 @@ function openReplaceModal(oldFp) {
 
           if (data.needsForce) {
             logLine(data.message, 'warn');
-            const again = confirm(`${data.message}\n\n确定要强制删除旧密钥吗？`);
+            const again = await confirmModal({
+              title: '旧密钥正在被使用',
+              message: `${data.message}\n\n确定要强制删除旧密钥吗？`,
+              danger: true,
+              okText: '强制删除',
+            });
             if (again) {
               btn.disabled = true;
               btn.textContent = '强制完成…';
@@ -191,12 +196,30 @@ async function askDelete(fingerprints) {
 
   const used = state.session.usedKeyFp && list.includes(state.session.usedKeyFp);
   const extra = used ? '\n\n⚠ 其中包含【本次连接正在使用】的钥匙，删掉会立刻断开且无法再登录。' : '';
-  if (!confirm(`确定从服务器删除这 ${list.length} 把钥匙？\n\n${info}${extra}\n\n写入前会自动备份原文件。`)) return;
+  if (
+    !(await confirmModal({
+      title: `删除 ${list.length} 把密钥`,
+      message: `确定从服务器删除这 ${list.length} 把钥匙？\n\n${info}${extra}\n\n写入前会自动备份原文件。`,
+      danger: true,
+      okText: '删除',
+    }))
+  )
+    return;
+
+  /* 「取消」保持原来的语义：不强制，但仍然发请求（服务端会回 needsForce 提示） */
+  const force = used
+    ? await confirmModal({
+        title: '强制删除当前连接用的钥匙',
+        message: '再次确认：这把钥匙正在用于本次连接，删掉会立刻断开且无法再登录。',
+        danger: true,
+        okText: '强制删除',
+      })
+    : false;
 
   try {
     const data = await api('/api/delete', {
       method: 'POST',
-      body: { sid: state.session.sid, fingerprints: list, force: used ? confirm('再次确认：强制删除当前连接用的钥匙？') : false },
+      body: { sid: state.session.sid, fingerprints: list, force },
     });
     (data.steps || []).forEach((s) => logLine(s, 'step'));
     state.session = data.session;

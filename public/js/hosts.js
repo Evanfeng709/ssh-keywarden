@@ -1,5 +1,5 @@
 'use strict';
-import { $, state, escapeHtml, toast, logLine, openModal, closeModal, api } from './core.js';
+import { $, state, escapeHtml, toast, logLine, openModal, closeModal, confirmModal, api } from './core.js';
 import { dirOfPath, openFilePicker, attachDirPicker } from './files.js';
 import { rescanLocal } from './keys.js';
 import { THEME_CHOICES, currentChoice, applyTheme } from './theme.js';
@@ -163,7 +163,15 @@ function openHostModal(hostId) {
       delBtn.addEventListener('click', async () => {
         const h = currentHost();
         if (!h) return;
-        if (!confirm(`确定删除服务器「${h.name}」的配置？（不会影响服务器上的密钥）`)) return;
+        if (
+          !(await confirmModal({
+            title: '删除服务器配置',
+            message: `确定删除服务器「${h.name}」的配置？（不会影响服务器上的密钥）`,
+            danger: true,
+            okText: '删除',
+          }))
+        )
+          return;
         try {
           await api(`/api/hosts?id=${encodeURIComponent(h.id)}`, { method: 'DELETE' });
           state.hosts = await api('/api/state').then((s) => s.hosts);

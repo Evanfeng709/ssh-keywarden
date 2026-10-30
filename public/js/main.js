@@ -9,6 +9,7 @@ import {
   rescanLocal,
   bindLocalTools,
   bindServerTools,
+  setAllSelected,
 } from './keys.js';
 import { doConnect, refreshSession, disconnect, handleSessionLost } from './connect.js';
 import { openAddModal, askDelete } from './actions.js';
@@ -96,8 +97,8 @@ function bind() {
   $('btnDisconnect').addEventListener('click', disconnect);
   $('btnAdd').addEventListener('click', openAddModal);
   $('btnBackups').addEventListener('click', openBackupsModal);
-  // 状态列里的登录方式徽章是动态渲染的，用事件委托
-  $('keyBody').addEventListener('click', (e) => {
+  // 登录方式徽章是动态渲染的，且挂在面板标题上（不在表格里），所以用 document 级委托
+  document.addEventListener('click', (e) => {
     if (e.target.closest('[data-sshd-toggle]')) toggleSshdFromBadge();
   });
   $('btnTerm').addEventListener('click', () => {
@@ -157,13 +158,9 @@ function bind() {
   })();
   $('btnDelete').addEventListener('click', () => askDelete([...state.selected]));
 
-  $('checkAll').addEventListener('change', (e) => {
-    const checkboxes = document.querySelectorAll('#keyBody input[type="checkbox"]');
-    checkboxes.forEach((cb) => {
-      cb.checked = e.target.checked;
-      cb.dispatchEvent(new Event('change'));
-    });
-  });
+  // 批量改复选框、行样式和 state.selected，只重算一次选择 UI
+  // （原来逐行 dispatchEvent('change')，N 把钥匙会各跑一次 updateSelectionUi）
+  $('checkAll').addEventListener('change', (e) => setAllSelected(e.target.checked));
 
   $('btnClearLog').addEventListener('click', () => ($('log').innerHTML = ''));
 

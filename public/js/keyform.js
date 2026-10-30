@@ -1,5 +1,5 @@
 'use strict';
-import { state, escapeHtml, shortFp, toast, logLine, api } from './core.js';
+import { state, escapeHtml, shortFp, toast, logLine, api, stripPubSuffix } from './core.js';
 import { attachDirPicker } from './files.js';
 import { renderHosts } from './hosts.js';
 
@@ -111,7 +111,7 @@ function keySourceForm(prefix, opts = {}) {
   /** 选中项的配对私钥是否是 passphrase 加密的 —— 决定了切换登录密钥时要不要密码 */
   function pairedPrivEncrypted(entry) {
     if (entry.kind === 'private') return Boolean(entry.encrypted);
-    const pair = entry.path.replace(/\.pub$/i, '');
+    const pair = stripPubSuffix(entry.path);
     const priv = (state.localKeys.entries || []).find((x) => x.kind === 'private' && x.path === pair);
     return Boolean(priv && priv.encrypted);
   }

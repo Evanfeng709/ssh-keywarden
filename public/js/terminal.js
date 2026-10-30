@@ -1,5 +1,5 @@
 'use strict';
-import { $, state, toast } from './core.js';
+import { $, state, toast, readClipboardText, writeClipboardText } from './core.js';
 import { doConnect } from './connect.js';
 import { alignSplitter } from './keys.js';
 import { termPalette, resolvedTheme, onThemeChange } from './theme.js';
@@ -13,41 +13,8 @@ let pendingTerminal = false;
 let clipboardBound = false;
 let themeBound = false;
 
-/** 桌面版走主进程剪贴板（不依赖浏览器权限），网页版退回 navigator.clipboard。
- *  读不到返回 null（和「剪贴板是空的」区分开）。 */
-async function readClipboardText() {
-  const kw = window.keywarden;
-  if (kw && typeof kw.readClipboard === 'function') {
-    try {
-      return (await kw.readClipboard()) || '';
-    } catch {
-      /* 落到下面的网页通道 */
-    }
-  }
-  try {
-    return (await navigator.clipboard.readText()) || '';
-  } catch {
-    return null;
-  }
-}
-
-async function writeClipboardText(text) {
-  const kw = window.keywarden;
-  if (kw && typeof kw.writeClipboard === 'function') {
-    try {
-      await kw.writeClipboard(text);
-      return true;
-    } catch {
-      /* 落到下面的网页通道 */
-    }
-  }
-  try {
-    await navigator.clipboard.writeText(text);
-    return true;
-  } catch {
-    return false;
-  }
-}
+/* readClipboardText / writeClipboardText 已下沉到 core.js —— 桌面版走主进程 IPC、
+   网页版退回 navigator.clipboard 的那套逻辑，全站只留一份。 */
 
 async function pasteIntoTerminal(term) {
   const text = await readClipboardText();
