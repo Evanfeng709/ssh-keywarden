@@ -32,7 +32,12 @@
   「导入后能按指纹找回私钥」、「对方的主机路径不会覆盖本机」。
   这条测试上线就抓到一个真 bug —— 落地文件名取指纹前 12 位，而 base64 指纹里含 `/`，
   会把路径劈成子目录（`os error 3`），单跑时靠运气没踩上。现已只保留字母数字。
-- `cargo test --workspace`：**149 项通过**；`flutter analyze` 无问题。
+- `cargo test --workspace`：**149 项通过**。
+- 桌面壳冒烟 `scripts/desktop-smoke.mjs`：**23/23 通过** —— 含「版本 0.4.0 贯通到页面」、
+  Cookie 令牌落位、主题与视图落盘、窗口状态含缩放比、关窗后进程退出。
+- 手机端：`flutter analyze` 无问题；`flutter build apk --debug` 构建成功
+  （`libkw_ffi.so` 的 arm64-v8a / armeabi-v7a / x86_64 三个 ABI 都在包内）；
+  `flutter test` **27 通过 1 跳过**（跳过的是需要 Android 运行时的 FFI 用例）。
 
 ## v0.3.1 — 2026-10-30
 
