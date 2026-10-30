@@ -29,6 +29,7 @@ struct Args {
     json: bool,
     passphrase_env: String,
     remember_key: bool,
+    force_upload: bool,
 }
 
 #[tokio::main]
@@ -135,7 +136,7 @@ async fn run(args: &Args) -> Result<u8, String> {
             let store = Store::new(&data_dir);
             let known_hosts = KnownHosts::new(known_hosts_file(&data_dir));
             let out =
-                ms_sync::sync_now(&store, &known_hosts, &passphrase, &args.trust_changed).await?;
+                ms_sync::sync_now(&store, &known_hosts, &passphrase, &args.trust_changed, args.force_upload).await?;
             let conflicts = out.report.known_host_conflicts.len();
 
             if args.json {
@@ -152,7 +153,11 @@ async fn run(args: &Args) -> Result<u8, String> {
                 return Ok(if conflicts == 0 { 0 } else { EXIT_CONFLICTS });
             }
 
-            if !out.pulled {
+            // pulled=false 有两种情况：云端真没包，或者用 --force-upload 主动跳过了拉取。
+            // 不能都说成「首次上传」，否则用户会以为云端那份从来没存在过。
+            if args.force_upload {
+                println!("已跳过拉取，用本机数据覆盖云端。");
+            } else if !out.pulled {
                 println!("云端还没有同步包，这次是首次上传。");
             }
             print_report(&out.report);
@@ -192,6 +197,7 @@ impl Args {
             json: false,
             passphrase_env: PASSPHRASE_ENV.to_string(),
             remember_key: false,
+            force_upload: false,
         };
         let mut i = 1;
         while i < argv.len() {
@@ -226,6 +232,7 @@ impl Args {
                         .to_string();
                 }
                 "--remember-key" => args.remember_key = true,
+                "--force-upload" => args.force_upload = true,
                 "--json" => args.json = true,
                 "-h" | "--help" => args.command = "help".to_string(),
                 other if other.starts_with('-') => {
@@ -382,11 +389,11 @@ fn resolve_data_dir(arg: Option<&Path>) -> PathBuf {
 
 fn print_help() {
     println!(
-        "kw-sync — SSH Keywarden 微软账号同步（只含主机/备注/主机指纹，不含私钥）
+        "kw-sync — SSH Keywarden 微软账号同步（主机 / 备注 / 主机指纹，以及可选的主机在用私钥）
 
 用法：
   kw-sync login  [--client-id <GUID>] [--data-dir <目录>] [--json]
-  kw-sync sync   [--trust-changed host:port,...] [--remember-key] [--data-dir <目录>] [--json]
+  kw-sync sync   [--trust-changed host:port,...] [--force-upload] [--remember-key] [--data-dir <目录>] [--json]
   kw-sync status [--data-dir <目录>] [--json]
   kw-sync logout [--data-dir <目录>] [--json]
   kw-sync help

@@ -145,6 +145,10 @@ struct SyncBody {
     remember_key: Option<bool>,
     #[serde(default)]
     trust_changed: Vec<String>,
+    /// 跳过拉取，直接用本机数据覆盖云端。
+    /// 用在「云端包解不开（换过口令 / 包损坏）但本机才是准的」这种死局。
+    #[serde(default)]
+    force_upload: bool,
 }
 
 async fn api_sync_now(
@@ -163,6 +167,7 @@ async fn api_sync_now(
         &state.known_hosts,
         &passphrase,
         &body.trust_changed,
+        body.force_upload,
     )
     .await
     .map_err(ApiError::bad)?;

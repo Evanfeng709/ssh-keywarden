@@ -551,6 +551,7 @@ class _KeyringTabState extends State<KeyringTab> {
     final st = _status;
     final pass = TextEditingController();
     var remember = st.hasSyncKey;
+    var forceUpload = false;
 
     final go = await showDialog<bool>(
       context: context,
@@ -592,6 +593,21 @@ class _KeyringTabState extends State<KeyringTab> {
                     style: TextStyle(fontSize: 10.5, color: KwColors.faint),
                   ),
                 ),
+                CheckboxListTile(
+                  contentPadding: EdgeInsets.zero,
+                  dense: true,
+                  value: forceUpload,
+                  onChanged: (v) => setLocal(() => forceUpload = v ?? false),
+                  title: Text(
+                    '用本机覆盖云端',
+                    style: TextStyle(fontSize: 12.5, color: KwColors.danger),
+                  ),
+                  subtitle: Text(
+                    '跳过拉取。只在云端包解不开（换过口令 / 包损坏）时用，'
+                    '云端那份会被替换且无法恢复',
+                    style: TextStyle(fontSize: 10.5, color: KwColors.faint),
+                  ),
+                ),
               ],
             ),
           ),
@@ -621,7 +637,10 @@ class _KeyringTabState extends State<KeyringTab> {
         // 新口令必须和云端保持一致；不记住就顺手清掉旧口令，避免下次用错
         await state.msSaveConfig(syncKey: remember ? passphrase : '');
       }
-      var result = await state.msSync(passphrase: passphrase);
+      var result = await state.msSync(
+        passphrase: passphrase,
+        forceUpload: forceUpload,
+      );
       if (!context.mounted) return;
 
       final conflicts = result.report['knownHostConflicts'];

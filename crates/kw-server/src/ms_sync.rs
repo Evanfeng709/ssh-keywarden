@@ -516,6 +516,7 @@ pub async fn sync_now(
     known_hosts: &KnownHosts,
     passphrase: &str,
     trust_changed: &[String],
+    force_upload: bool,
 ) -> Result<MsSyncResult, String> {
     let data_dir = store.dir().to_path_buf();
     let cfg = read_config(&data_dir);
@@ -533,16 +534,22 @@ pub async fn sync_now(
     let mut auth = ensure_valid_token(&client, &data_dir).await?;
     let url = format!("{GRAPH_BASE}/me/drive/special/approot:/{SYNC_FILE}:/content");
 
-    let resp = client
-        .get(&url)
-        .bearer_auth(&auth.access_token)
-        .send()
-        .await
-        .map_err(|e| format!("读取 OneDrive 同步文件失败：{e}"))?;
-
     let keys_dir = store.dir().join("keys");
     let mut report = ImportReport::default();
-    let pulled = match resp.status() {
+
+    // `force_upload`：跳过拉取，直接用本机状态覆盖云端。
+    // 用于「云端包解不开（换过口令 / 包损坏）但本机数据才是准的」这种死局 ——
+    // 否则拉取那一步一失败就直接返回，用户永远没有自愈的路。
+    let pulled = if force_upload {
+        false
+    } else {
+        let resp = client
+            .get(&url)
+            .bearer_auth(&auth.access_token)
+            .send()
+            .await
+            .map_err(|e| format!("读取 OneDrive 同步文件失败：{e}"))?;
+        match resp.status() {
         StatusCode::OK => {
             let text = resp
                 .text()
@@ -569,7 +576,8 @@ pub async fn sync_now(
         StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => {
             return Err("微软账号授权已失效，请重新登录".to_string());
         }
-        other => return Err(format!("OneDrive 读取失败（HTTP {}）", other.as_u16())),
+            other => return Err(format!("OneDrive 读取失败（HTTP {}）", other.as_u16())),
+        }
     };
 
     if !report.known_host_conflicts.is_empty() {
@@ -682,7 +690,7 @@ mod tests {
             .enable_all()
             .build()
             .unwrap();
-        let err = rt.block_on(sync_now(&store, &kh, "  ", &[])).unwrap_err();
+        let err = rt.block_on(sync_now(&store, &kh, "  ", &[], false)).unwrap_err();
         assert!(err.contains("同步口令"), "{err}");
     }
 }

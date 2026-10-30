@@ -89,6 +89,7 @@ function footHtml() {
   if (s.loggedIn) {
     return (
       `<button type="button" data-sync-logout>退出登录</button>` +
+      `<button type="button" data-sync-force${busy ? ' disabled' : ''} title="跳过拉取，直接用本机数据覆盖云端。云端包解不开（换过口令 / 包损坏）时用这个换回同步">覆盖云端</button>` +
       `<button type="button" class="primary" data-sync-now${busy ? ' disabled' : ''}>${busy ? '同步中…' : '立即同步'}</button>`
     );
   }
@@ -223,6 +224,7 @@ function render() {
   on('[data-sync-login]', startLogin);
   on('[data-sync-now]', () => doSync([]));
   on('[data-sync-logout]', logout);
+  on('[data-sync-force]', forceUpload);
   on('[data-sync-copy]', copyCode);
   on('[data-sync-open]', openLoginPage);
   on('[data-sync-keep]', () => {
@@ -296,7 +298,28 @@ function openLoginPage() {
   window.open(url, '_blank');
 }
 
-async function doSync(trustChanged) {
+/**
+ * 用本机覆盖云端。
+ *
+ * 存在的理由：云端包一旦解不开（换过同步口令、或上传时被截断），普通同步会在
+ * 拉取那一步直接失败，用户就再也没有退路 —— 既不能同步，也不能清掉那份坏包。
+ * 这个按钮就是那条退路，属于破坏性操作，必须二次确认。
+ */
+async function forceUpload() {
+  const ok = await confirmModal({
+    title: '用本机覆盖云端？',
+    message:
+      '会跳过拉取，直接用这台设备上的主机、备注和私钥重写 OneDrive 里的同步包。\n\n' +
+      '云端原来那份会被替换且无法恢复。只在「确认本机数据才是准的」时候用 —— ' +
+      '例如换过同步口令、导致旧包已经解不开。',
+    danger: true,
+    okText: '覆盖云端',
+  });
+  if (!ok) return;
+  doSync([], true);
+}
+
+async function doSync(trustChanged, force) {
   if (busy) return;
   const passEl = modal && modal.querySelector('#syncPass');
   const rememberEl = modal && modal.querySelector('#syncRemember');
@@ -310,7 +333,12 @@ async function doSync(trustChanged) {
   try {
     const r = await api('/api/sync/now', {
       method: 'POST',
-      body: { passphrase: passphrase || undefined, rememberKey, trustChanged },
+      body: {
+        passphrase: passphrase || undefined,
+        rememberKey,
+        trustChanged,
+        forceUpload: force || undefined,
+      },
     });
     await refreshStatus();
     const left = r.report ? r.report.knownHostConflicts : [];

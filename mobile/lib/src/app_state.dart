@@ -348,13 +348,17 @@ class AppState extends ChangeNotifier {
   });
 
   /// 口令留空就用本机记住的那份；指纹冲突通过 [trustChanged] 二次确认后覆盖。
+  ///
+  /// [forceUpload] 跳过拉取、直接用本机覆盖云端 —— 云端包解不开时的唯一出路。
   Future<MsSyncResult> msSync({
     String passphrase = '',
     List<String> trustChanged = const [],
+    bool forceUpload = false,
   }) => _run(() async {
     final data = await _engine.call('msSync', {
       'passphrase': passphrase,
       if (trustChanged.isNotEmpty) 'trustChanged': trustChanged,
+      if (forceUpload) 'forceUpload': true,
     });
     await _reloadQuiet();
     return MsSyncResult.fromJson(data);
