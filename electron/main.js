@@ -39,6 +39,17 @@ function resolveAppDataDir() {
 const THEME_CHOICES = new Set(['obsidian', 'midnight', 'graphite', 'cloud', 'linen', 'mist', 'auto', 'auto-soft']);
 let themeChoice = '';
 
+/**
+ * 原子写 JSON：先写同名 .tmp 再 rename 覆盖。
+ * 退出瞬间被强杀 / 断电时，rename 是原子的，不会留下 0 字节的坏文件
+ * （和 src/store.js 里核心数据的做法保持一致）。
+ */
+function writeJsonAtomic(file, value) {
+  const tmp = `${file}.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify(value), 'utf8');
+  fs.renameSync(tmp, file);
+}
+
 function loadThemeChoice() {
   try {
     const raw = JSON.parse(fs.readFileSync(path.join(appDataDir, 'theme.json'), 'utf8'));
@@ -51,7 +62,7 @@ function loadThemeChoice() {
 
 function saveThemeChoice(choice) {
   try {
-    fs.writeFileSync(path.join(appDataDir, 'theme.json'), JSON.stringify({ choice }), 'utf8');
+    writeJsonAtomic(path.join(appDataDir, 'theme.json'), { choice });
   } catch {
     /* 存不下也只是这一轮不记住，不打断使用 */
   }
@@ -70,10 +81,31 @@ function loadUiState() {
   }
 }
 
+/**
+ * 上次的位置可能落在一块已经不存在的显示器上（拖到外接副屏关窗，下次拔了屏再启动）。
+ * 窗口是无边框的，没有系统标题栏可拖，落在可视区外用户基本救不回来，
+ * 所以按「与该矩形最贴近的显示器」把坐标夹回它的 workArea 内。
+ */
+function clampToWorkArea(bounds) {
+  const { screen } = require('electron');
+  const area = screen.getDisplayMatching(bounds).workArea;
+  const width = Math.min(Math.round(bounds.width), area.width);
+  const height = Math.min(Math.round(bounds.height), area.height);
+  const x = Math.min(Math.max(Math.round(bounds.x), area.x), area.x + area.width - width);
+  const y = Math.min(Math.max(Math.round(bounds.y), area.y), area.y + area.height - height);
+  return { x, y, width, height };
+}
+
 function loadWindowState() {
   try {
     const raw = JSON.parse(fs.readFileSync(path.join(appDataDir, 'window-state.json'), 'utf8'));
-    if (raw && Number(raw.width) >= 900 && Number(raw.height) >= 600) return raw;
+    if (!raw || Number(raw.width) < 900 || Number(raw.height) < 600) return { width: 1280, height: 820 };
+    const width = Math.round(Number(raw.width));
+    const height = Math.round(Number(raw.height));
+    // 只有尺寸没有坐标（旧文件 / 首次保存前）：交给 Electron 自己居中。
+    // 注意这里不能用 Number(x) 判断 —— Number(null) 是 0，会被当成「坐标就在 0,0」。
+    if (!Number.isFinite(raw.x) || !Number.isFinite(raw.y)) return { width, height };
+    return clampToWorkArea({ x: Number(raw.x), y: Number(raw.y), width, height });
   } catch {
     /* 没有或损坏就用默认尺寸 */
   }
@@ -83,8 +115,7 @@ function loadWindowState() {
 function saveWindowState() {
   if (!mainWindow || mainWindow.isDestroyed()) return;
   try {
-    const bounds = mainWindow.getNormalBounds();
-    fs.writeFileSync(path.join(appDataDir, 'window-state.json'), JSON.stringify(bounds), 'utf8');
+    writeJsonAtomic(path.join(appDataDir, 'window-state.json'), mainWindow.getNormalBounds());
   } catch {
     /* 窗口状态存不下不影响使用 */
   }
@@ -164,7 +195,7 @@ function registerIpc() {
     const h = patch.termHeight;
     if (h === 0 || (Number.isFinite(h) && h >= 180 && h <= 10000)) next.termHeight = Math.round(h);
     try {
-      fs.writeFileSync(path.join(appDataDir, 'ui.json'), JSON.stringify(next), 'utf8');
+      writeJsonAtomic(path.join(appDataDir, 'ui.json'), next);
     } catch {
       throw new Error('无法保存视图设置');
     }

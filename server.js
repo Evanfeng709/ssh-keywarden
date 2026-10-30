@@ -468,6 +468,8 @@ async function openSession(body) {
       keysLoaded: withKeys,
       usedKeyFp: authMethod === 'key' ? fingerprintOfPrivateKey(auth.privateKey, auth.passphrase) : '',
       authMethod,
+      /* 同一会话的写操作排队执行，避免两个请求交错读写 authorized_keys */
+      lock: Promise.resolve(),
       createdAt: Date.now(),
       lastUsed: Date.now(),
     };
@@ -550,6 +552,28 @@ function mustKeySession(body) {
   const session = mustSession(body);
   if (!session.keysLoaded) throw new Error('请先切换到密钥管理并读取服务器密钥');
   return session;
+}
+
+/**
+ * 同一会话的写操作串行化（FIFO）。
+ *
+ * addKey / replaceKey / deleteKeys / restoreBackup 都是「读 → 改 → 备份 → 写 → 回读」的多步流程，
+ * 两个请求交织会让后一个读到的还是旧内容，把前一个的修改整个盖掉；
+ * 备份名又是秒级时间戳，同一秒内两次写还会互相覆盖 .bak。
+ *
+ * 用 Promise 链把门，不引第三方库。被包住的函数内部不要再对同一个 session 调一次
+ * withSessionLock —— 那会自己等自己，永远不返回。
+ */
+function withSessionLock(session, fn) {
+  const prev = session.lock || Promise.resolve();
+  // 前一个失败也要让下一个继续跑，所以两个分支都接 fn
+  const next = prev.then(
+    () => fn(),
+    () => fn()
+  );
+  // 链上只留「已结束」，不让错误传染给后续请求
+  session.lock = next.catch(() => {});
+  return next;
 }
 
 /** 找本地某个公钥对应的私钥文件（用于更换时做真实登录验证） */
@@ -693,8 +717,13 @@ function resolveNewKey(session, body, settings) {
 
 /** 写盘 + 回读校验的公共流程 */
 async function commitKeys(session, newText, steps) {
+  // 远端路径来自用户配置，必须和别处一样过断言 + 单引号转义，
+  // 不能裸拼进 shell（路径里一个 ' 就能把命令截断）
+  ssh.assertSafePath(session.remotePath);
   const dir = path.posix.dirname(session.remotePath);
-  const mk = await ssh.exec(session.client, `mkdir -p '${dir}' && chmod 700 '${dir}'`);
+  ssh.assertSafePath(dir);
+  const qDir = ssh.quote(dir);
+  const mk = await ssh.exec(session.client, `mkdir -p ${qDir} && chmod 700 ${qDir}`);
   if (mk.code !== 0) throw new Error(`创建目录 ${dir} 失败：${mk.stderr.trim() || '权限不足'}`);
 
   const backup = await ssh.backupFile(session.client, session.remotePath);
@@ -782,9 +811,11 @@ async function addKey(session, body) {
   steps.push('公钥不在服务器上，准备写入');
 
   const newText = result.text;
-  await commitKeys(session, newText, steps);
+  // commitKeys 已经回读过了，直接拿它的结果做校验和回包 ——
+  // 之前这里又读了两次，等于每次新增多跑两个 SSH exec（跨国 VPS 上很扎眼）
+  const readback = await commitKeys(session, newText, steps);
 
-  const verifyParsed = parseAuthorizedKeys(await ssh.readRemoteText(session.client, session.remotePath));
+  const verifyParsed = parseAuthorizedKeys(readback);
   const found = keyItems(verifyParsed.items).some((i) => i.fingerprint === fresh.fingerprint);
   if (!found) throw new Error('回读校验失败：新公钥没有出现在 authorized_keys 里');
   steps.push(`校验通过：指纹 ${fresh.fingerprint}`);
@@ -800,7 +831,7 @@ async function addKey(session, body) {
     identityFile: switchInfo.identityFile || '',
     switchReason: switchInfo.reason || '',
     steps,
-    session: sessionPayload(session, await ssh.readRemoteText(session.client, session.remotePath)),
+    session: sessionPayload(session, readback),
   };
 }
 
@@ -824,9 +855,9 @@ async function replaceKey(session, body) {
 
   // 1) 先加新
   const withNew = appendKey(parsed, fresh.publicKeyLine);
-  let text = withNew.text;
+  let afterAddRaw = raw;
   if (withNew.appended) {
-    await commitKeys(session, text, steps);
+    afterAddRaw = await commitKeys(session, withNew.text, steps);
     steps.push('第 1 步完成：新密钥已加入');
   } else {
     steps.push(`第 1 步跳过：${withNew.reason}`);
@@ -856,7 +887,7 @@ async function replaceKey(session, body) {
       needsForce: true,
       message: `${verifyError}。为防把自己锁在门外，旧密钥【没有删除】。确认新钥匙能登录后，可勾选强制完成。`,
       steps,
-      session: sessionPayload(session, await ssh.readRemoteText(session.client, session.remotePath)),
+      session: sessionPayload(session, afterAddRaw || ''),
     };
   }
 
@@ -881,7 +912,7 @@ async function replaceKey(session, body) {
   }
 
   const finalText = renderWithout(curParsed, dropIndexes);
-  await commitKeys(session, finalText, steps);
+  const fin = await commitKeys(session, finalText, steps);
   steps.push('第 3 步完成：旧密钥已移除');
   if (session.usedKeyFp === oldFp) {
     session.usedKeyFp = fresh.fingerprint;
@@ -907,7 +938,6 @@ async function replaceKey(session, body) {
     steps.push('注意：新密钥在本地没有对应私钥文件，请手动把主机私钥改成对应文件，否则下次连接会失败');
   }
 
-  const fin = await ssh.readRemoteText(session.client, session.remotePath);
   const stillThere = keyItems(parseAuthorizedKeys(fin || '').items).some((i) => i.fingerprint === oldFp);
   if (stillThere) throw new Error('回读校验失败：旧密钥仍然存在');
 
@@ -950,9 +980,8 @@ async function deleteKeys(session, body) {
 
   const text = renderWithout(parsed, dropItems.map((i) => i.index));
   steps.push(`准备删除 ${dropItems.length} 条：${[...new Set(targets)].join(', ')}`);
-  await commitKeys(session, text, steps);
+  const fin = await commitKeys(session, text, steps);
 
-  const fin = await ssh.readRemoteText(session.client, session.remotePath);
   const left = keyItems(parseAuthorizedKeys(fin || '').items);
   const leaked = left.filter((i) => targets.includes(i.fingerprint));
   if (leaked.length) throw new Error(`删除未完全生效，仍有 ${leaked.length} 条匹配的密钥`);
@@ -1000,9 +1029,8 @@ async function restoreBackup(session, body) {
   }
 
   const steps = [`准备从备份恢复：${parsedName.displayTime}（${name}）`];
-  await commitKeys(session, backupText, steps);
+  const fin = await commitKeys(session, backupText, steps);
 
-  const fin = await ssh.readRemoteText(session.client, session.remotePath);
   const expected = new Set(keyItems(parseAuthorizedKeys(backupText).items).map((i) => i.fingerprint));
   const actual = new Set(keyItems(parseAuthorizedKeys(fin || '').items).map((i) => i.fingerprint));
   if (expected.size !== actual.size || [...expected].some((fp) => !actual.has(fp))) {
@@ -1206,48 +1234,56 @@ async function handleApi(req, res, pathname, url) {
   if (pathname === '/api/sshd/password-auth' && method === 'POST') {
     const body = await readJson(req);
     const session = mustKeySession(body);
-    const enableKeyOnly = Boolean(body.enable);
+    // 和密钥写入共用同一把会话锁：改 sshd 期间不允许 add/delete 穿插（那会读到半截状态）
+    return ok(
+      res,
+      await withSessionLock(session, async () => {
+        const enableKeyOnly = Boolean(body.enable);
 
-    const before = await sshd.inspect(session.client);
-    if (!before.available) throw new Error(before.reason);
-    if (!before.canWrite) {
-      throw new Error('需要 root 或免密 sudo 才能修改 sshd 配置');
-    }
+        const before = await sshd.inspect(session.client);
+        if (!before.available) throw new Error(before.reason);
+        if (!before.canWrite) {
+          throw new Error('需要 root 或免密 sudo 才能修改 sshd 配置');
+        }
 
-    // 安全闸门：开启「仅密钥登录」前，必须确认自己现在就是用密钥进来的
-    if (enableKeyOnly) {
-      const raw = (await ssh.readRemoteText(session.client, session.remotePath)) || '';
-      const keys = keyItems(parseAuthorizedKeys(raw).items);
-      if (!keys.length) {
-        throw new Error('服务器上没有任何授权密钥，开启仅密钥登录会让你彻底进不去，已拒绝');
-      }
-      if (session.authMethod !== 'key') {
-        throw new Error('本次是密码登录。开启仅密钥登录后，这个会话一断就再也连不回来 —— 请先用密钥成功登录一次再操作');
-      }
-      if (!session.usedKeyFp) {
-        throw new Error('无法确认本次连接所用的密钥，为安全起见已拒绝');
-      }
-      if (!keys.some((k) => k.fingerprint === session.usedKeyFp)) {
-        throw new Error('本次连接所用的钥匙不在 authorized_keys 里，开启后会把你锁死，已拒绝');
-      }
-    }
+        // 安全闸门：开启「仅密钥登录」前，必须确认自己现在就是用密钥进来的
+        if (enableKeyOnly) {
+          const raw = (await ssh.readRemoteText(session.client, session.remotePath)) || '';
+          const keys = keyItems(parseAuthorizedKeys(raw).items);
+          if (!keys.length) {
+            throw new Error('服务器上没有任何授权密钥，开启仅密钥登录会让你彻底进不去，已拒绝');
+          }
+          if (session.authMethod !== 'key') {
+            throw new Error('本次是密码登录。开启仅密钥登录后，这个会话一断就再也连不回来 —— 请先用密钥成功登录一次再操作');
+          }
+          if (!session.usedKeyFp) {
+            throw new Error('无法确认本次连接所用的密钥，为安全起见已拒绝');
+          }
+          if (!keys.some((k) => k.fingerprint === session.usedKeyFp)) {
+            throw new Error('本次连接所用的钥匙不在 authorized_keys 里，开启后会把你锁死，已拒绝');
+          }
+        }
 
-    const result = await sshd.setKeyOnly(session.client, enableKeyOnly, before);
-    const after = await sshd.inspect(session.client);
-    const effective = enableKeyOnly ? !after.passwordAuth : after.passwordAuth;
+        const result = await sshd.setKeyOnly(session.client, enableKeyOnly, before);
+        const after = await sshd.inspect(session.client);
+        const effective = enableKeyOnly ? !after.passwordAuth : after.passwordAuth;
 
-    log(
-      `sshd 密码登录已${enableKeyOnly ? '关闭' : '开启'}（${session.target.username}@${session.target.host}，备份 ${result.backup || '无'}）`
+        log(
+          `sshd 密码登录已${enableKeyOnly ? '关闭' : '开启'}（${session.target.username}@${session.target.host}，备份 ${
+            result.backup || '无'
+          }）`
+        );
+
+        return {
+          ...result,
+          status: after,
+          effective,
+          warning: effective
+            ? ''
+            : '配置已写入，但检测到密码登录状态没变 —— 可能被 sshd_config.d 里的 drop-in 覆盖，请检查该目录',
+        };
+      })
     );
-
-    return ok(res, {
-      ...result,
-      status: after,
-      effective,
-      warning: effective
-        ? ''
-        : '配置已写入，但检测到密码登录状态没变 —— 可能被 sshd_config.d 里的 drop-in 覆盖，请检查该目录',
-    });
   }
 
   if (pathname === '/api/local-keys' && method === 'GET') {
@@ -1292,14 +1328,19 @@ async function handleApi(req, res, pathname, url) {
   if (pathname === '/api/refresh' && method === 'POST') {
     const body = await readJson(req);
     const session = mustSession(body);
-    const home = session.keysLoaded ? session.home : await ssh.resolveHome(session.client);
-    const remotePath = session.keysLoaded ? session.remotePath : expandPath(session.target.remotePath, home);
-    const raw = await ssh.readRemoteText(session.client, remotePath);
-    session.home = home;
-    session.remotePath = remotePath;
-    session.fileExists = raw !== null;
-    session.keysLoaded = true;
-    return ok(res, sessionPayload(session, raw || ''));
+    return ok(
+      res,
+      await withSessionLock(session, async () => {
+        const home = session.keysLoaded ? session.home : await ssh.resolveHome(session.client);
+        const remotePath = session.keysLoaded ? session.remotePath : expandPath(session.target.remotePath, home);
+        const raw = await ssh.readRemoteText(session.client, remotePath);
+        session.home = home;
+        session.remotePath = remotePath;
+        session.fileExists = raw !== null;
+        session.keysLoaded = true;
+        return sessionPayload(session, raw || '');
+      })
+    );
   }
 
   if (pathname === '/api/backups' && method === 'GET') {
@@ -1325,25 +1366,25 @@ async function handleApi(req, res, pathname, url) {
   if (pathname === '/api/backups/restore' && method === 'POST') {
     const body = await readJson(req);
     const session = mustKeySession(body);
-    return ok(res, await restoreBackup(session, body));
+    return ok(res, await withSessionLock(session, () => restoreBackup(session, body)));
   }
 
   if (pathname === '/api/add' && method === 'POST') {
     const body = await readJson(req);
     const session = mustKeySession(body);
-    return ok(res, await addKey(session, body));
+    return ok(res, await withSessionLock(session, () => addKey(session, body)));
   }
 
   if (pathname === '/api/replace' && method === 'POST') {
     const body = await readJson(req);
     const session = mustKeySession(body);
-    return ok(res, await replaceKey(session, body));
+    return ok(res, await withSessionLock(session, () => replaceKey(session, body)));
   }
 
   if (pathname === '/api/delete' && method === 'POST') {
     const body = await readJson(req);
     const session = mustKeySession(body);
-    return ok(res, await deleteKeys(session, body));
+    return ok(res, await withSessionLock(session, () => deleteKeys(session, body)));
   }
 
   if (pathname === '/api/disconnect' && method === 'POST') {

@@ -545,6 +545,8 @@ test('package.json / package-lock 与 version.js 同步', () => {
   assert.strictEqual(lock.packages[''].version, version.APP_VERSION_SEMVER);
   assert.strictEqual(pkg.name, 'ssh-keywarden');
   assert.strictEqual(lock.packages[''].name, pkg.name);
+  // engines 容易只改 package.json 忘了 lock（lock 是 npm install 时从 package.json 抄的）
+  assert.deepStrictEqual(lock.packages[''].engines, pkg.engines, 'package-lock 的 engines 必须与 package.json 一致');
 });
 
 test('CHANGELOG 有当前版本条目', () => {

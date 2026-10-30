@@ -249,14 +249,17 @@ for f in /etc/ssh/sshd_config.d/*.conf; do
   fi
 done
 
-if ! sshd -t 2>/tmp/.kk_sshd_check; then
+ERR_LOG=$(mktemp)
+if ! sshd -t 2>"$ERR_LOG"; then
   echo "__ERR__ 新配置语法校验未通过，已全部回滚"
-  cat /tmp/.kk_sshd_check 2>/dev/null || true   # set -e 下 cat 失败会中断回滚，必须兜住
+  cat "$ERR_LOG" 2>/dev/null || true   # set -e 下 cat 失败会中断回滚，必须兜住
+  rm -f "$ERR_LOG" 2>/dev/null || true
   for b in $BACKUPS; do
     cp -p "$b" "\${b%.bak.\$STAMP}"
   done
   exit 1
 fi
+rm -f "$ERR_LOG" 2>/dev/null || true
 
 RELOADED="no"
 if command -v systemctl >/dev/null 2>&1; then

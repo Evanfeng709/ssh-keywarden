@@ -41,6 +41,11 @@ function writeAll(all) {
   fs.mkdirSync(DATA_DIR, { recursive: true });
   const tmp = `${FILE}.tmp`;
   fs.writeFileSync(tmp, JSON.stringify(all, null, 2), { encoding: 'utf8', mode: 0o600 });
+  // 和 src/store.js 的 writeJsonAtomic 对齐：mode 只在新建时生效，
+  // 覆盖上次崩溃残留的 .tmp 时要再补一刀
+  try {
+    fs.chmodSync(tmp, 0o600);
+  } catch {}
   fs.renameSync(tmp, FILE);
 }
 

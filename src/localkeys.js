@@ -17,6 +17,20 @@ function looksLikePublic(text) {
   return parsePublicKeyLine(line.trim()) !== null;
 }
 
+/** 只读开头若干字节：用来在不整份读的情况下嗅探文件类型 */
+function readHead(fullPath, bytes) {
+  const fd = fs.openSync(fullPath, 'r');
+  try {
+    const buf = Buffer.alloc(bytes);
+    const n = fs.readSync(fd, buf, 0, bytes, 0);
+    return buf.subarray(0, n).toString('utf8');
+  } finally {
+    try {
+      fs.closeSync(fd);
+    } catch {}
+  }
+}
+
 /**
  * 扫描目录（递归，限深度），返回 { entries, errors }
  * entry: { path, name, dir, kind:'private'|'public', type, fingerprint, comment, encrypted, size, mtime }
@@ -53,6 +67,25 @@ function scanKeys(rootDir, options = {}) {
         continue;
       }
       if (stat.size === 0 || stat.size > MAX_FILE_SIZE) continue;
+
+      // 先只读开头 4KB 嗅探：密钥目录里常混着几百 KB 的文档、日志、截图，
+      // 整份读进来只为确认「这不是密钥」白烧 IO（OneDrive 按需文件还会触发云端拉取）
+      let head;
+      try {
+        head = readHead(full, Math.min(4096, stat.size));
+      } catch (e) {
+        errors.push({ path: full, message: e.message });
+        continue;
+      }
+
+      const headIsPrivate = /-----BEGIN [A-Z ]*PRIVATE KEY-----/.test(head);
+      const headIsPublic = !headIsPrivate && looksLikePublic(head);
+      // 只有注释/空行时无法判定 —— 可能是「注释写在前面」的公钥文件，这类少见，退回整份读
+      const headOnlyComments =
+        !headIsPrivate &&
+        !headIsPublic &&
+        head.split(/\r?\n/).every((l) => !l.trim() || l.trim().startsWith('#'));
+      if (!headIsPrivate && !headIsPublic && !headOnlyComments) continue;
 
       let text;
       try {

@@ -792,6 +792,41 @@ async function main() {
     assert.strictEqual(count, 1);
   });
 
+  // 并发写：没有会话锁时两个 add 各自基于同一份旧内容计算，后完成的那次整份覆盖前一次，
+  // 最终只剩一把钥匙，且两次备份可能撞同一个秒级时间戳。
+  console.log('\n[并发写]');
+  const snapBefore = FS.get(AUTH_PATH);
+  const mkConcKey = (label) => {
+    const gen = keygen.generateEd25519(label);
+    const parsed = keygen.parsePublicKeyLine(gen.publicKeyLine);
+    return { publicKeyLine: gen.publicKeyLine, b64: parsed.b64, fingerprint: parsed.fingerprint };
+  };
+  const ck1 = mkConcKey('concurrent-1');
+  const ck2 = mkConcKey('concurrent-2');
+  const [c1, c2] = await Promise.all([
+    call('/api/add', { sid: s1.sid, mode: 'paste', publicKey: ck1.publicKeyLine }),
+    call('/api/add', { sid: s1.sid, mode: 'paste', publicKey: ck2.publicKeyLine }),
+  ]);
+
+  test('并发两次新增都成功', () => {
+    assert.strictEqual(c1.changed, true);
+    assert.strictEqual(c2.changed, true);
+  });
+
+  test('并发写入不互相覆盖：两把钥匙都在', () => {
+    const text = FS.get(AUTH_PATH);
+    assert.ok(text.includes(ck1.b64), '第一把钥匙应保留');
+    assert.ok(text.includes(ck2.b64), '第二把钥匙应保留');
+  });
+
+  test('并发写入两把都过了回读校验', () => {
+    assert.ok(c1.steps.some((s) => s.includes('校验通过')));
+    assert.ok(c2.steps.some((s) => s.includes('校验通过')));
+  });
+
+  // 还原 mock 文件，避免影响后面的用例
+  FS.set(AUTH_PATH, snapBefore);
+
   await assertRejects(
     () => call('/api/add', { sid: s1.sid, mode: 'paste', publicKey: '这不是公钥' }),
     /没有识别到公钥/,

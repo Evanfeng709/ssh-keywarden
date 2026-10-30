@@ -51,6 +51,11 @@ function writeJsonAtomic(file, value) {
   ensureDir();
   const tmp = `${file}.tmp`;
   fs.writeFileSync(tmp, JSON.stringify(value, null, 2), { encoding: 'utf8', mode: 0o600 });
+  // writeFileSync 的 mode 只在「新建文件」时生效：上次崩溃留下的 .tmp 会被直接覆盖，
+  // 权限仍是它自己的。核心数据里可能有服务器地址和备注，这里补一刀确保 0600。
+  try {
+    fs.chmodSync(tmp, 0o600);
+  } catch {}
   fs.renameSync(tmp, file); // 原子替换
   return value;
 }

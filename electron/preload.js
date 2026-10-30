@@ -16,7 +16,10 @@ contextBridge.exposeInMainWorld('keywarden', {
     close: () => ipcRenderer.send('kw:win-close'),
     isMaximized: () => ipcRenderer.invoke('kw:win-is-maximized'),
     onMaximizeChange: (cb) => {
-      ipcRenderer.on('kw:win-max-changed', (_event, max) => cb(Boolean(max)));
+      const handler = (_event, max) => cb(Boolean(max));
+      ipcRenderer.on('kw:win-max-changed', handler);
+      /* 返回解绑函数：重复调用 onMaximizeChange 时由调用方负责清掉上一个 */
+      return () => ipcRenderer.removeListener('kw:win-max-changed', handler);
     },
   },
   readClipboard: () => ipcRenderer.invoke('kw:read-clipboard'),
@@ -24,7 +27,9 @@ contextBridge.exposeInMainWorld('keywarden', {
   systemTheme: {
     get: () => ipcRenderer.invoke('kw:system-theme'),
     onChange: (cb) => {
-      ipcRenderer.on('kw:system-theme-changed', (_event, dark) => cb(Boolean(dark)));
+      const handler = (_event, dark) => cb(Boolean(dark));
+      ipcRenderer.on('kw:system-theme-changed', handler);
+      return () => ipcRenderer.removeListener('kw:system-theme-changed', handler);
     },
   },
   theme: {
