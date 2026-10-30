@@ -7,4 +7,4 @@
 ///
 /// 顶栏展示用这个常量，而不是后端 bootstrap 里的版本：那是 Rust 核心的号，
 /// 跟手机 App 的发布节奏不是一回事。
-const String kMobileVersion = 'v2026.10.30.2';
+const String kMobileVersion = 'v2026.10.30.3';
