@@ -1,7 +1,9 @@
 name: kw_mobile
 description: "SSH Keywarden 手机端：直连 kw-ffi，不开 HTTP。"
 publish_to: 'none'
-version: 0.4.0+4
+# 手机端版本独立于桌面：versionName 是日期，build 是 YYYYMMDDNN 形式的 versionCode
+# （必须单调递增，否则某些 ROM 会拒绝安装「相同版本」）。
+version: 2026.10.30+2026103001
 
 environment:
   sdk: ^3.13.5
@@ -18,6 +20,16 @@ dev_dependencies:
   flutter_test:
     sdk: flutter
   flutter_lints: ^6.0.0
+  flutter_launcher_icons: ^0.14.4
 
 flutter:
   uses-material-design: true
+
+# 图标生成：在 mobile/ 下跑 `dart run flutter_launcher_icons`
+# 桌面端那套图标是满幅方图，直接当 adaptive foreground 会被系统裁掉边缘，
+# 所以只生成传统图标，圆角/遮罩交给系统。
+flutter_launcher_icons:
+  android: true
+  ios: false
+  image_path: "../crates/kw-desktop/icons/icon.png"
+  min_sdk_android: 21

@@ -527,10 +527,13 @@ mod tests {
             "tauri.conf.json 的 version 与 Cargo.toml 不一致"
         );
 
+        // Cargo 的 semver 只能把「当天第几次」放在 prerelease 位（2026.10.30-1），
+        // CHANGELOG 的标题统一写成 v2026.10.30.1，这里做一次映射
+        let display = format!("v{}", version.replace('-', "."));
         let changelog = include_str!("../../../CHANGELOG.md");
         assert!(
-            changelog.contains(&format!("## v{version}")),
-            "CHANGELOG.md 缺少 v{version} 段"
+            changelog.contains(&format!("## {display}")),
+            "CHANGELOG.md 缺少 {display} 段"
         );
     }
 

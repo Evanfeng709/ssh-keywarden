@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../app_state.dart';
+import '../version.dart';
 import 'keys_tab.dart';
 import 'keyring_tab.dart';
 import 'terminal_tab.dart';
@@ -64,7 +65,7 @@ class _MobileShellState extends State<MobileShell> {
                 borderRadius: BorderRadius.circular(9),
               ),
               child: Text(
-                state.bootstrap?.version ?? '…',
+                kMobileVersion,
                 style: TextStyle(
                   fontSize: 9.5,
                   color: KwColors.faint,

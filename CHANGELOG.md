@@ -1,12 +1,33 @@
 # CHANGELOG
 
-> 版本号规则：语义化版本（semver），当前 `0.4.0`。
-> 单一来源是根 `Cargo.toml` 的 `[workspace.package].version`，三处必须同步：
-> `crates/kw-desktop/tauri.conf.json`（由 `kw-desktop` 单测
-> `version_matches_tauri_conf_and_changelog` 兜底）与 `mobile/pubspec.yaml`
-> （由 `kw-ffi` 的 `mobile_pubspec_version_matches_workspace` 兜底）。
-> **手机端的 `+build` 是 Android 的 versionCode，必须单调递增** —— 只涨 semver 不涨 build，
-> 某些 ROM 会把新包当成「相同版本」拒绝安装。
+> 版本号规则：**日期 + 当天第几次**，形如 `v2026.10.30.1`（v0.4.0 及之前用的是 semver，历史条目保持原样）。
+> 桌面/后端的单一来源是根 `Cargo.toml` 的 `[workspace.package].version` —— Cargo 只认 semver，
+> 所以实际存成 `2026.10.30-1`（末段放在 prerelease 位），展示时换成点号。
+> `crates/kw-desktop/tauri.conf.json` 必须同值，由 `kw-desktop` 单测
+> `version_matches_tauri_conf_and_changelog` 兜底。
+> **手机端独立编号**（见 `mobile/pubspec.yaml`）：`versionName` 是日期，`versionCode` 是
+> `YYYYMMDDNN`，必须单调递增 —— 只改日期不涨序号，某些 ROM 会把新包当「相同版本」拒绝安装。
+
+## v2026.10.30.1 — 2026-10-30
+
+### 新增
+
+- **同步解不开时的出路**：桌面与手机都加了「用本机覆盖云端」，CLI 加 `--force-upload`。
+  换过同步口令、或上传被截断之后，云端包就再也解不开了，而普通同步在「拉取→解密」这步
+  直接失败 —— 用户既同步不了，也清不掉那份坏包。这个入口补上了那条退路，覆盖前二次确认。
+- 手机端新增密钥支持「粘贴公钥」，可以把电脑上同步来的钥匙直接追加到服务器。
+
+### 修复
+
+- CLI 用 `--force-upload` 时误报「云端还没有同步包，这次是首次上传」。
+- CLI 帮助里「不含私钥」的说明过期（v0.4.0 起私钥可随包同步）。
+
+### 变更
+
+- **手机端版本号独立于桌面**：`pubspec.yaml` 改为 `2026.10.30+2026103001`
+  （versionName 是日期、versionCode 是 `YYYYMMDDNN`）。两端不再强制同号，
+  `kw-ffi` 里那条 `mobile_pubspec_version_matches_workspace` 断言随之移除。
+- 手机端换成和桌面同一套图标。
 
 ## v0.4.0 — 2026-10-30
 
