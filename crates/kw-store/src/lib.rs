@@ -330,6 +330,27 @@ impl Store {
         Ok(host)
     }
 
+    /// 同步导入专用：主机还没配私钥路径时，把它指到刚落地的文件。
+    ///
+    /// 只在「本机为空」时写 —— 已经配好的路径属于这台设备，不该被同步包覆盖。
+    /// 返回是否真的写入了。
+    pub fn set_host_identity_if_empty(&self, id: &str, path: &str) -> Result<bool, StoreError> {
+        if path.trim().is_empty() {
+            return Ok(false);
+        }
+        let mut cfg = self.read();
+        let Some(host) = cfg.hosts.iter_mut().find(|h| h.id == id) else {
+            return Ok(false);
+        };
+        if !host.identity_file.trim().is_empty() {
+            return Ok(false);
+        }
+        host.identity_file = path.trim().to_string();
+        host.updated_at = now_ms();
+        self.write(&cfg)?;
+        Ok(true)
+    }
+
     /// 删除 = 打墓碑。真正移除留给未来的清理任务，否则跨设备同步时
     /// 对方看不到「这条被删了」，下次导入又会把它复活。
     pub fn remove_host(&self, id: &str) -> Result<(), StoreError> {

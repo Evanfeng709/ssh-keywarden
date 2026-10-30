@@ -4,7 +4,7 @@
 //! 以及**主机实际在用**的私钥（可选，且强制加密后才允许带上）。
 //! 桌面 CLI（`kw-sync`）与手机 FFI 共用这一份实现，避免两端算法走样。
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use aes_gcm::aead::{Aead, KeyInit, Payload};
@@ -24,7 +24,7 @@ use kw_store::{Host, MergeOutcome, NoteEntry, Store};
 use crate::sessions::fingerprint_of_private_key;
 
 pub const SYNC_FORMAT: &str = "kw-sync";
-pub const SYNC_VERSION: u32 = 2;
+pub const SYNC_VERSION: u32 = 3;
 const MIN_VERSION: u32 = 1;
 const SYNC_AAD: &[u8] = b"kw-sync-v1";
 
@@ -47,12 +47,25 @@ pub struct SyncBundle {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PrivateKeyEntry {
+    /// 私钥内容的 SHA256（hex），用来当身份标识。
+    ///
+    /// 早期版本拿「公钥指纹」当标识，可加密私钥不发 passphrase 就算不出指纹，
+    /// 于是那些钥匙全被跳过 —— 相当于「私钥同步」对有 passphrase 的人完全无效。
+    /// 内容哈希不需要解开私钥，加密的也照传。旧包缺这个字段时按内容现算。
+    #[serde(default)]
+    pub sha256: String,
+    /// 能算出指纹就填（明文私钥）；加密的留空，不影响同步。
+    #[serde(default)]
     pub fingerprint: String,
     /// OpenSSH / PEM 私钥原文；本身可能还带 passphrase。
     pub pem: String,
-    /// 原文件名，仅作为落地时的命名参考。
+    /// 原文件名，仅作落地时的命名参考。
     #[serde(default)]
     pub file_name: String,
+    /// 哪些主机（host.id）在用这把钥匙。
+    /// 导入时据此把对应主机的 `identity_file` 指到落地路径，换设备不用手改。
+    #[serde(default)]
+    pub host_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -88,6 +101,8 @@ pub struct ImportReport {
     pub updated_known_hosts: usize,
     /// 落地的私钥数量（已存在且内容一致的不计）。
     pub imported_keys: usize,
+    /// 落地私钥后，顺手把多少台主机（本机原本没配私钥路径的）指到了新路径。
+    pub linked_identities: usize,
     pub known_host_conflicts: Vec<KnownHostConflict>,
 }
 
@@ -98,15 +113,28 @@ fn now_secs() -> u64 {
         .unwrap_or(0)
 }
 
+/// 私钥内容的 SHA256（hex），当作钥匙的身份标识。
+///
+/// 只看字节、不解析内容 —— 带 passphrase 的私钥照样能算，
+/// 这正是它能替代「公钥指纹」的原因。
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    format!("{:x}", hasher.finalize())
+}
+
 /// 收集「主机实际在用」的私钥。
 ///
 /// 不是把整个密钥库搬上去：只挑被某台存活主机引用的那些。
-/// 加密私钥在不知道 passphrase 时算不出指纹，跳过并回报原因 ——
-/// 这种跳过必须让用户看见，否则他会以为私钥已经同步好了。
+/// 身份标识用**内容哈希**而非公钥指纹 —— 加密私钥不发 passphrase 也算得出来，
+/// 否则设了 passphrase 的用户会发现「私钥同步」对自己完全无效（踩过这个坑）。
 fn collect_private_keys(store: &Store, keys_dir: &Path) -> (Vec<PrivateKeyEntry>, Vec<String>) {
     let mut out: Vec<PrivateKeyEntry> = Vec::new();
     let mut warnings: Vec<String> = Vec::new();
-    let mut seen: BTreeSet<String> = BTreeSet::new();
+    // 内容哈希 → out 下标，用于合并「多台主机共用同一把钥匙」
+    let mut index_by_sha: BTreeMap<String, usize> = BTreeMap::new();
+    let mut encrypted_hosts: Vec<String> = Vec::new();
 
     for host in store.list_hosts() {
         if host.deleted_at > 0 {
@@ -127,25 +155,38 @@ fn collect_private_keys(store: &Store, keys_dir: &Path) -> (Vec<PrivateKeyEntry>
             ));
             continue;
         };
+
+        let sha = sha256_hex(text.as_bytes());
+        if let Some(&idx) = index_by_sha.get(&sha) {
+            if !out[idx].host_ids.contains(&host.id) {
+                out[idx].host_ids.push(host.id.clone());
+            }
+            continue;
+        }
+
         let fingerprint = fingerprint_of_private_key(&text, None);
         if fingerprint.is_empty() {
-            warnings.push(format!(
-                "主机「{}」的私钥已加密，没有 passphrase 无法识别，已跳过",
-                host.name
-            ));
-            continue;
+            encrypted_hosts.push(host.name.clone());
         }
-        if !seen.insert(fingerprint.clone()) {
-            continue;
-        }
+        index_by_sha.insert(sha.clone(), out.len());
         out.push(PrivateKeyEntry {
+            sha256: sha,
             fingerprint,
             pem: text,
             file_name: path
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_default(),
+            host_ids: vec![host.id.clone()],
         });
+    }
+
+    if !encrypted_hosts.is_empty() {
+        warnings.push(format!(
+            "{} 把私钥带 passphrase（{}），已随包同步；连这些主机时仍需输入各自的私钥密码",
+            encrypted_hosts.len(),
+            encrypted_hosts.join("、")
+        ));
     }
     (out, warnings)
 }
@@ -155,15 +196,15 @@ fn collect_private_keys(store: &Store, keys_dir: &Path) -> (Vec<PrivateKeyEntry>
 /// 已存在同名且内容一致的文件直接跳过 —— 反复同步不应该反复重写私钥文件。
 fn write_private_key(keys_dir: &Path, entry: &PrivateKeyEntry) -> Result<PathBuf, String> {
     std::fs::create_dir_all(keys_dir).map_err(|e| format!("创建密钥目录失败：{e}"))?;
-    // 指纹是 base64（含 `+` `/`），直接拿来当文件名会被 `/` 劈成子目录 ——
-    // 只留字母数字，撞名概率依然极低，但路径一定合法
-    let short: String = entry
-        .fingerprint
-        .trim_start_matches("SHA256:")
-        .chars()
-        .filter(|c| c.is_ascii_alphanumeric())
-        .take(12)
-        .collect();
+    // 内容哈希是 hex，天然就是合法文件名。
+    // （早期拿 base64 指纹当名字，里面的 `/` 会把路径劈成子目录 —— os error 3）
+    let sha = if entry.sha256.trim().is_empty() {
+        // 兼容 v1/v2 的旧包：没有 sha256 字段，按内容现算
+        sha256_hex(entry.pem.as_bytes())
+    } else {
+        entry.sha256.trim().to_string()
+    };
+    let short: String = sha.chars().take(12).collect();
     let name = if short.is_empty() {
         entry.file_name.clone()
     } else {
@@ -268,11 +309,24 @@ pub fn import_bundle(
 
     let mut report = ImportReport::default();
 
-    // 私钥先落地：后面的主机合并要靠指纹在本地密钥库里找到它们
+    // 1) 私钥先落地，同时记下「内容哈希 → 本地路径」和「host.id → 该用哪个哈希」
+    let mut path_by_sha: BTreeMap<String, PathBuf> = BTreeMap::new();
+    let mut sha_by_host: BTreeMap<String, String> = BTreeMap::new();
     for key in &bundle.private_keys {
+        let sha = if key.sha256.trim().is_empty() {
+            sha256_hex(key.pem.as_bytes())
+        } else {
+            key.sha256.trim().to_string()
+        };
         match write_private_key(keys_dir, key) {
-            Ok(_) => report.imported_keys += 1,
-            Err(e) => eprintln!("[sync] 私钥落地失败（{}）：{e}", key.fingerprint),
+            Ok(path) => {
+                report.imported_keys += 1;
+                path_by_sha.insert(sha.clone(), path);
+                for hid in &key.host_ids {
+                    sha_by_host.insert(hid.clone(), sha.clone());
+                }
+            }
+            Err(e) => eprintln!("[sync] 私钥落地失败（{sha}）：{e}"),
         }
     }
 
@@ -286,6 +340,22 @@ pub fn import_bundle(
             Ok(MergeOutcome::Tombstoned) => report.deleted_hosts += 1,
             Ok(MergeOutcome::Skipped) => report.skipped_hosts += 1,
             Err(_) => report.skipped_hosts += 1,
+        }
+
+        // 2) 本机这台主机还没配私钥路径 → 用刚落地的那个填上。
+        //    已经配好的不动（merge_host 刚刚把它保住了）。这样换设备后
+        //    不用再手动去选一遍私钥文件。
+        if host.deleted_at > 0 {
+            continue;
+        }
+        if let Some(sha) = sha_by_host.get(&host.id) {
+            if let Some(path) = path_by_sha.get(sha) {
+                match store.set_host_identity_if_empty(&host.id, &path.display().to_string()) {
+                    Ok(true) => report.linked_identities += 1,
+                    Ok(false) => {}
+                    Err(e) => eprintln!("[sync] 回填私钥路径失败（{}）：{e}", host.id),
+                }
+            }
         }
     }
 
@@ -640,5 +710,72 @@ mod tests {
             .unwrap();
         assert_eq!(imported.identity_fingerprint, gen.fingerprint);
         assert_ne!(imported.identity_file, key_path.display().to_string());
+    }
+
+    #[test]
+    fn encrypted_private_key_syncs_without_passphrase() {
+        let a_dir = tempfile::tempdir().unwrap();
+        let b_dir = tempfile::tempdir().unwrap();
+        let (a, akh) = setup(a_dir.path());
+        let (b, bkh) = setup(b_dir.path());
+
+        // 带 passphrase 的私钥：公钥指纹算不出来，但内容哈希照样算得出
+        let gen = kw_keys::generate_ed25519(Some("enc@test"), Some("key-pass")).unwrap();
+        assert!(gen.encrypted, "这把应当是加密私钥");
+        let keys_a = a.dir().join("keys");
+        std::fs::create_dir_all(&keys_a).unwrap();
+        let key_path = keys_a.join("id_enc");
+        std::fs::write(&key_path, &gen.private_key_pem).unwrap();
+
+        let host = sample_host(&a, "encrypted");
+        a.upsert_host(HostPatch {
+            id: Some(host.id.clone()),
+            name: Some(host.name.clone()),
+            host: Some(host.host.clone()),
+            port: Some(host.port),
+            username: Some(host.username.clone()),
+            identity_file: Some(key_path.display().to_string()),
+            identity_fingerprint: None,
+            remote_path: Some(host.remote_path.clone()),
+        })
+        .unwrap();
+
+        let text = export_bundle(&a, &akh, &keys_a, true, Some("sync-pass")).unwrap();
+        let b_keys = b.dir().join("keys");
+        let report = import_bundle(
+            &b,
+            &bkh,
+            &b_keys,
+            &text,
+            Some("sync-pass"),
+            &ImportOptions::default(),
+        )
+        .unwrap();
+
+        // 关键：加密私钥也要进包并落地（旧实现会在这一步整把跳过）
+        assert_eq!(report.imported_keys, 1);
+        let landed: Vec<_> = std::fs::read_dir(&b_keys)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .collect();
+        assert_eq!(landed.len(), 1, "应当落地一个私钥文件");
+        assert_eq!(
+            std::fs::read_to_string(landed[0].path()).unwrap(),
+            gen.private_key_pem,
+            "落地内容要和原文件逐字节一致"
+        );
+
+        // 主机的私钥路径被自动回填，换设备不用手选
+        assert_eq!(report.linked_identities, 1);
+        let imported = b
+            .list_hosts()
+            .into_iter()
+            .find(|h| h.name == "encrypted")
+            .unwrap();
+        assert!(
+            imported.identity_file.contains("synced_"),
+            "导入后 identity_file 应指向落地文件，实际是 {}",
+            imported.identity_file
+        );
     }
 }
