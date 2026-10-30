@@ -3,7 +3,8 @@ description: "SSH Keywarden 手机端：直连 kw-ffi，不开 HTTP。"
 publish_to: 'none'
 # 手机端版本独立于桌面：versionName 是日期，build 是 YYYYMMDDNN 形式的 versionCode
 # （必须单调递增，否则某些 ROM 会拒绝安装「相同版本」）。
-version: 2026.10.30+2026103001
+# ⚠️ .so 重编也要涨号 —— 安装包里确实换了东西。
+version: 2026.10.30+2026103002
 
 environment:
   sdk: ^3.13.5
