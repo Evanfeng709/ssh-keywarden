@@ -1,0 +1,23 @@
+name: kw_mobile
+description: "SSH Keywarden 手机端：直连 kw-ffi，不开 HTTP。"
+publish_to: 'none'
+version: 0.3.0+3
+
+environment:
+  sdk: ^3.13.5
+
+# 刻意不引插件（path_provider 之类）：Windows 上构建插件需要开发者模式开符号链接，
+# 而手机端只需要一个可写目录。Android/iOS 走本仓自己的 MethodChannel。
+dependencies:
+  flutter:
+    sdk: flutter
+  cupertino_icons: ^1.0.8
+  ffi: ^2.1.4
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+
+flutter:
+  uses-material-design: true

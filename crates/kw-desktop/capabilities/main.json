@@ -1,0 +1,34 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "main-window",
+  "description": "主窗口：本地回环页面 + 桌面桥命令",
+  "windows": ["main"],
+  "remote": {
+    "urls": ["http://127.0.0.1:*"]
+  },
+  "permissions": [
+    "core:default",
+    "core:window:allow-start-dragging",
+    "core:window:allow-internal-toggle-maximize",
+    "core:window:allow-minimize",
+    "core:window:allow-maximize",
+    "core:window:allow-unmaximize",
+    "core:window:allow-close",
+    "core:window:allow-show",
+    "core:window:allow-is-maximized",
+    "core:window:allow-theme",
+    "core:event:allow-listen",
+    "core:event:allow-unlisten",
+    "core:webview:allow-internal-toggle-devtools",
+    "allow-pick-file",
+    "allow-pick-dir",
+    "allow-open-data-dir",
+    "allow-toggle-maximize",
+    "allow-is-maximized",
+    "allow-read-clipboard",
+    "allow-write-clipboard",
+    "allow-system-theme",
+    "allow-theme-set",
+    "allow-ui-set"
+  ]
+}

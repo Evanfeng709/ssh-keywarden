@@ -1,0 +1,19 @@
+[package]
+name = "kw-sync"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "SSH Keywarden 桌面微软账号同步 CLI（只同步主机、备注、主机指纹）"
+
+[[bin]]
+name = "kw-sync"
+path = "src/main.rs"
+
+[dependencies]
+kw-store = { path = "../kw-store" }
+kw-ssh = { path = "../kw-ssh" }
+kw-server = { path = "../kw-server" }
+serde_json.workspace = true
+tokio.workspace = true
+rpassword = "7"

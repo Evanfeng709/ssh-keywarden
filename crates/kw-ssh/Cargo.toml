@@ -1,0 +1,23 @@
+[package]
+name = "kw-ssh"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+kw-core = { path = "../kw-core" }
+kw-keys = { path = "../kw-keys" }
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+base64.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+russh.workspace = true
+# russh 默认用 aws-lc-rs；预编译汇编省掉本机 NASM 依赖
+aws-lc-rs = { version = "1", features = ["prebuilt-nasm"] }
+tokio.workspace = true
+async-trait = "0.1"
+
+[dev-dependencies]
+tempfile = "3"

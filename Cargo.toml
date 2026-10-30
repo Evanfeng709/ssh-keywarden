@@ -1,0 +1,39 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/kw-core",
+    "crates/kw-keys",
+    "crates/kw-store",
+    "crates/kw-ssh",
+    "crates/kw-server",
+    "crates/kw-desktop",
+    "crates/kw-ffi",
+    "crates/kw-sync",
+]
+
+[workspace.package]
+version = "0.3.1"
+edition = "2021"
+license = "MIT"
+authors = ["Evanfeng709"]
+
+[workspace.dependencies]
+anyhow = "1.0"
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+base64 = "0.22"
+sha2 = "0.10"
+# 0.6 是当前稳定线；0.7 还在 rc。密钥类型合并进 ssh-key 自身，不再需要 russh-keys。
+ssh-key = { version = "0.6.7", features = ["ed25519", "rsa", "p256", "p384", "p521", "encryption", "rand_core"] }
+# ssh-key 自己不生成 RSA 密钥，生成必须借 rsa crate（并且要能读旧版写下的 PKCS#1 PEM）
+rsa = { version = "0.9.10", features = ["pem"] }
+rand = "0.8"
+zeroize = { version = "1.9", features = ["derive"] }
+uuid = { version = "1", features = ["v4"] }
+russh = "0.65"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "io-util", "net", "signal"] }
+
+[profile.release]
+lto = "thin"
+strip = true

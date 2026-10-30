@@ -1,0 +1,37 @@
+[package]
+name = "kw-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+kw-core = { path = "../kw-core" }
+kw-keys = { path = "../kw-keys" }
+kw-store = { path = "../kw-store" }
+kw-ssh = { path = "../kw-ssh" }
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+base64.workspace = true
+rand.workspace = true
+tokio.workspace = true
+uuid.workspace = true
+axum = { version = "0.8.9", features = ["ws"] }
+futures-util = "0.3"
+zeroize.workspace = true
+tempfile = "3"
+open = "5"
+# 同步包加密（Argon2id + AES-256-GCM）与微软账号同步（设备码 + Graph）。
+# rustls 校验器自带内置根证书，Android 上不需要 Kotlin 侧初始化。
+argon2 = "0.6"
+aes-gcm = "0.10"
+reqwest = { version = "0.13", default-features = false, features = ["json", "form", "rustls-no-provider", "system-proxy"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+webpki-roots = "1"
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"
+# 端到端测试用 russh::server 在内存里起一台假 SSH 服务器
+russh.workspace = true
