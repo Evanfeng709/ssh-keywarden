@@ -76,6 +76,21 @@ class _MobileShellState extends State<MobileShell> {
           ],
         ),
         actions: [
+          if (state.connected && _index != 1)
+            Padding(
+              padding: const EdgeInsets.only(right: 4),
+              child: TextButton.icon(
+                style: TextButton.styleFrom(
+                  visualDensity: VisualDensity.compact,
+                  backgroundColor: KwColors.okSoft,
+                  foregroundColor: KwColors.ok,
+                  padding: const EdgeInsets.symmetric(horizontal: 9),
+                ),
+                onPressed: () => setState(() => _index = 1),
+                icon: const Icon(Icons.terminal_rounded, size: 14),
+                label: const Text('活跃终端', style: TextStyle(fontSize: 11.5)),
+              ),
+            ),
           IconButton(
             tooltip: '外观主题',
             visualDensity: VisualDensity.compact,
@@ -104,8 +119,16 @@ class _MobileShellState extends State<MobileShell> {
       body: IndexedStack(
         index: _index,
         children: [
-          KeysTab(state: state, onOpenSync: () => setState(() => _index = 2)),
-          TerminalTab(state: state, active: _index == 1),
+          KeysTab(
+            state: state,
+            onOpenSync: () => setState(() => _index = 2),
+            onOpenTerminal: () => setState(() => _index = 1),
+          ),
+          TerminalTab(
+            state: state,
+            active: _index == 1,
+            onOpenHosts: () => setState(() => _index = 0),
+          ),
           KeyringTab(state: state),
         ],
       ),
@@ -119,14 +142,14 @@ class _MobileShellState extends State<MobileShell> {
           onDestinationSelected: (i) => setState(() => _index = i),
           destinations: const [
             NavigationDestination(
-              icon: Icon(Icons.shield_outlined),
-              selectedIcon: Icon(Icons.shield_rounded),
-              label: '服务器密钥',
+              icon: Icon(Icons.dns_outlined),
+              selectedIcon: Icon(Icons.dns_rounded),
+              label: '主机与密钥',
             ),
             NavigationDestination(
               icon: Icon(Icons.terminal_outlined),
               selectedIcon: Icon(Icons.terminal_rounded),
-              label: '纯终端',
+              label: 'SSH 终端',
             ),
             NavigationDestination(
               icon: Icon(Icons.key_outlined),

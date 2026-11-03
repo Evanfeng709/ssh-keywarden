@@ -1,24 +1,39 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import '../app_paths.dart';
 import '../app_state.dart';
 import '../models.dart';
 import '../terminal_emulator.dart';
+import '../terminal_input.dart';
+import '../terminal_painter.dart';
 import '../terminal_runner.dart';
 import 'common.dart';
 import 'theme.dart';
 
-/// 纯终端页：PTY 在后台 isolate 里持续读，界面只渲染网格。
+/// 纯终端页：PTY 在后台 isolate 里持续读，界面按固定格子自己画。
+///
+/// 交互对齐 Termius：**没有输入框**，点终端自己弹键盘（隐藏的 TextField 只在
+/// 输入法组合时兜底）；顶部是可折叠的快捷键工具条；长按选词、拖动扩选、可复制。
 class TerminalTab extends StatefulWidget {
-  const TerminalTab({super.key, required this.state, required this.active});
+  const TerminalTab({
+    super.key,
+    required this.state,
+    required this.active,
+    this.onOpenHosts,
+  });
 
   final AppState state;
 
   /// 只有这一页被选中时才去开 PTY、拉输出。
   final bool active;
+
+  /// 跳回「主机·密钥」页的回调。
+  final VoidCallback? onOpenHosts;
 
   @override
   State<TerminalTab> createState() => _TerminalTabState();
@@ -30,9 +45,6 @@ const double _lineHeight = 1.3;
 const double _minFontSize = 9;
 const double _maxFontSize = 22;
 const double _defaultFontSize = 13;
-
-/// 修饰键三态：关 → 单次生效（敲完一个键自动弹起）→ 锁定常亮（再点取消）。
-enum _ModState { off, once, locked }
 
 /// 顶栏「⚡」抽屉里的高频运维命令。
 class _Snippet {
@@ -53,7 +65,7 @@ const List<_Snippet> _snippets = <_Snippet>[
 class _TerminalTabState extends State<TerminalTab> {
   TerminalScreen _screen = TerminalScreen();
 
-  /// 字号（双指捏合可调）。不能做成顶层常量：缩放后布局要重算。
+  /// 字号（双指捏合可调，落盘记忆）。
   double _fontSize = _defaultFontSize;
 
   // 不能做成常量缓存：切主题后文字颜色要跟着变。
@@ -78,28 +90,31 @@ class _TerminalTabState extends State<TerminalTab> {
   bool _closed = false;
   bool _opening = false;
 
-  String _lastInput = '';
-  bool _clearScheduled = false;
+  /// 输入框当前文本（永远是哨兵 + 尚未提交的组合串），用于算增量。
+  String _imeText = kImeSentinel;
+  bool _suppressIme = false;
 
   double _cellW = 8;
   double _cellH = _defaultFontSize * _lineHeight;
   int _cols = 80;
   int _rows = 24;
+  bool _hasLayout = false;
   Timer? _resizeTimer;
   int _pendingCols = 0;
   int _pendingRows = 0;
 
   bool _stickToBottom = true;
 
-  /// Ctrl / Alt 三态（见 [_ModState]）。
-  _ModState _ctrlMode = _ModState.off;
-  _ModState _altMode = _ModState.off;
-
-  /// 方向键 / PgUp / PgDn 长按连发的计时器。
-  Timer? _repeatTimer;
-
   /// 快捷命令抽屉是否展开。
   bool _showSnippets = false;
+
+  /// 选区：锚点与焦点都是 (绝对行号, 列号)，绝对行号把 history 和 grid 连起来。
+  (int, int)? _selAnchor;
+  (int, int)? _selFocus;
+
+  /// 字号落盘的文件 + 防抖计时器。
+  File? _prefsFile;
+  Timer? _prefsTimer;
 
   /// 触控追踪：双指间距用于捏合缩放，单指位移用于备用屏（vim/htop/less）翻页。
   /// 用 Listener 自己算，而不是 GestureDetector.onScale —— 后者会跟 ListView
@@ -109,10 +124,19 @@ class _TerminalTabState extends State<TerminalTab> {
   double _pinchStartFont = _defaultFontSize;
   double _panAccumY = 0;
 
+  bool get _hasSelection => _selAnchor != null && _selFocus != null;
+
   @override
   void initState() {
     super.initState();
     _measure();
+    // 隐藏输入框常驻一个零宽哨兵，退格才能被检测到（见 diffIme 注释）。
+    _input.value = const TextEditingValue(
+      text: kImeSentinel,
+      selection: TextSelection.collapsed(offset: 1),
+    );
+    _input.addListener(_onImeChanged);
+    unawaited(_loadPrefs());
     widget.state.addListener(_onStateChanged);
     _syncSession();
   }
@@ -129,13 +153,60 @@ class _TerminalTabState extends State<TerminalTab> {
   void dispose() {
     widget.state.removeListener(_onStateChanged);
     _resizeTimer?.cancel();
-    _repeatTimer?.cancel();
+    _prefsTimer?.cancel();
     _events?.cancel();
     _runner?.dispose();
+    _input.removeListener(_onImeChanged);
     _input.dispose();
     _scroll.dispose();
     _focus.dispose();
     super.dispose();
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* 设置持久化（字号）                                                  */
+  /* ------------------------------------------------------------------ */
+
+  Future<File?> _prefsFilePath() async {
+    try {
+      final dir = await AppPaths.supportDir();
+      return File('$dir${Platform.pathSeparator}terminal-prefs.json');
+    } catch (_) {
+      return null;
+    }
+  }
+
+  Future<void> _loadPrefs() async {
+    final file = await _prefsFilePath();
+    if (file == null) return;
+    _prefsFile = file;
+    try {
+      if (!await file.exists()) return;
+      final data = jsonDecode(await file.readAsString());
+      final raw = data is Map ? data['fontSize'] : null;
+      if (raw is num &&
+          raw >= _minFontSize &&
+          raw <= _maxFontSize &&
+          mounted) {
+        setState(() => _fontSize = raw.toDouble());
+        _measure();
+      }
+    } catch (_) {
+      // 读不到就用默认字号，别让设置文件坏了整个终端
+    }
+  }
+
+  void _scheduleSavePrefs() {
+    _prefsTimer?.cancel();
+    _prefsTimer = Timer(const Duration(milliseconds: 400), () {
+      final file = _prefsFile;
+      if (file == null) return;
+      try {
+        file.writeAsStringSync(jsonEncode({'fontSize': _fontSize}));
+      } catch (_) {
+        // 写不进去下次再来
+      }
+    });
   }
 
   /* ------------------------------------------------------------------ */
@@ -154,6 +225,8 @@ class _TerminalTabState extends State<TerminalTab> {
       _sid = sid;
       _closed = false;
       _error = null;
+      _selAnchor = null;
+      _selFocus = null;
       if (mounted) setState(() {});
     }
     _syncActive();
@@ -172,7 +245,7 @@ class _TerminalTabState extends State<TerminalTab> {
       runner.resume();
       return;
     }
-    if (_closed || _opening) return;
+    if (!_hasLayout || _closed || _opening) return;
     _open(sid);
   }
 
@@ -221,8 +294,11 @@ class _TerminalTabState extends State<TerminalTab> {
       case TerminalOpened(:final termId, :final cols, :final rows):
         setState(() {
           _termId = termId;
-          _screen.resize(cols, rows);
+          _screen.resize(_cols, _rows);
         });
+        if (cols != _cols || rows != _rows) {
+          _runner?.resize(_cols, _rows);
+        }
       case TerminalOutput(:final bytes, :final dropped):
         if (dropped) {
           // 中间丢过数据，旧状态不可信，直接重画一张空白的
@@ -260,76 +336,57 @@ class _TerminalTabState extends State<TerminalTab> {
     _runner?.input(bytes);
   }
 
-  /// Ctrl 键转控制字符：字母/符号取低 5 位（Ctrl-A = 0x01），空格是 NUL，'?' 是 DEL。
-  static int? _ctrlByte(String ch) {
-    if (ch.isEmpty) return null;
-    final code = ch.toUpperCase().codeUnitAt(0);
-    if (code >= 0x40 && code <= 0x5F) return code & 0x1F;
-    if (ch == ' ') return 0x00;
-    if (ch == '?') return 0x7f;
-    return null;
-  }
-
   void _sendText(String text) {
     if (text.isEmpty) return;
-    final ctrl = _ctrlMode != _ModState.off;
-    final alt = _altMode != _ModState.off;
-    if (!ctrl && !alt) {
-      _sendBytes(utf8.encode(text.replaceAll('\n', '\r')));
-      return;
-    }
-    final out = <int>[];
-    for (final rune in text.replaceAll('\n', '\r').runes) {
-      final ch = String.fromCharCode(rune);
-      if (ctrl) {
-        final b = _ctrlByte(ch);
-        if (b != null) {
-          if (alt) out.add(0x1b);
-          out.add(b);
-          continue;
-        }
-      }
-      if (alt) out.add(0x1b);
-      out.addAll(utf8.encode(ch));
-    }
-    _sendBytes(out);
-    _dropOneShotModifiers();
+    _sendBytes(utf8.encode(text.replaceAll('\n', '\r')));
   }
 
-  /// 单次模式的修饰键敲完即复位；锁定模式保持常亮。
-  void _dropOneShotModifiers() {
-    if (_ctrlMode != _ModState.once && _altMode != _ModState.once) return;
-    setState(() {
-      if (_ctrlMode == _ModState.once) _ctrlMode = _ModState.off;
-      if (_altMode == _ModState.once) _altMode = _ModState.off;
-    });
+  /// 输入框有变化：算增量再发，然后把输入框复位回「只剩哨兵」。
+  ///
+  /// - 组合输入（中文/日文输入法）进行中：先不发，等上屏后整段发。
+  /// - 其余情况交给纯函数 [diffIme] 判断是「新增文本」还是「退格」。
+  void _onImeChanged() {
+    if (_suppressIme) return;
+    final value = _input.value;
+    // 输入法正在组合（拼音未上屏）：不要把它当普通字符发走
+    if (value.composing.isValid && !value.composing.isCollapsed) return;
+
+    final edit = diffIme(_imeText, value.text);
+    if (edit == null) return;
+    switch (edit) {
+      case TextEdit(:final text):
+        _sendText(text);
+      case BackspaceEdit(:final count):
+        _sendBytes(List<int>.filled(count, 0x7f));
+    }
+    _resetIme();
   }
 
-  void _onInputChanged(String value) {
-    final previous = _lastInput;
-    _lastInput = value;
-    if (value == previous) return;
-    if (value.startsWith(previous)) {
-      _sendText(value.substring(previous.length));
-    } else if (previous.startsWith(value)) {
-      _sendBytes(List<int>.filled(previous.length - value.length, 0x7f));
+  /// 把输入框复位成「只剩一个哨兵」，光标放末尾；复位期间的变更不算用户输入。
+  void _resetIme() {
+    _suppressIme = true;
+    _input.value = const TextEditingValue(
+      text: kImeSentinel,
+      selection: TextSelection.collapsed(offset: 1),
+    );
+    _imeText = kImeSentinel;
+    _suppressIme = false;
+  }
+
+  /// 点终端：收起选区并弹键盘。
+  void _onTerminalTap() {
+    if (_hasSelection) {
+      setState(() {
+        _selAnchor = null;
+        _selFocus = null;
+      });
+    }
+    if (_focus.hasFocus) {
+      SystemChannels.textInput.invokeMethod<void>('TextInput.show');
     } else {
-      _sendText(value);
+      _focus.requestFocus();
     }
-    _scheduleClear();
-  }
-
-  /// 输入框只是中转站：发完就清空，避免内容越攒越多。
-  void _scheduleClear() {
-    if (_clearScheduled) return;
-    _clearScheduled = true;
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      _clearScheduled = false;
-      if (!mounted) return;
-      if (_input.text.isEmpty) return;
-      _input.clear();
-      _lastInput = '';
-    });
+    _followBottom();
   }
 
   Future<void> _paste() async {
@@ -358,6 +415,12 @@ class _TerminalTabState extends State<TerminalTab> {
     final app = _screen.applicationCursorKeys;
     if (key == LogicalKeyboardKey.escape) return <int>[0x1b];
     if (key == LogicalKeyboardKey.tab) return <int>[0x09];
+    // 硬键盘的退格/回车直接翻成字节，别让输入框自己吞掉
+    if (key == LogicalKeyboardKey.backspace) return <int>[0x7f];
+    if (key == LogicalKeyboardKey.enter ||
+        key == LogicalKeyboardKey.numpadEnter) {
+      return <int>[0x0d];
+    }
     if (key == LogicalKeyboardKey.arrowUp) {
       return utf8.encode(app ? '\x1bOA' : '\x1b[A');
     }
@@ -383,6 +446,124 @@ class _TerminalTabState extends State<TerminalTab> {
   }
 
   /* ------------------------------------------------------------------ */
+  /* 选区（长按选词 / 拖动扩选 / 复制）                                   */
+  /* ------------------------------------------------------------------ */
+
+  /// 屏幕坐标 → (绝对行号, 列号)。
+  (int, int)? _cellAt(Offset local) {
+    final total = _screen.history.length + _screen.grid.length;
+    if (total == 0 || _cellH <= 0 || _cellW <= 0) return null;
+    final raw = _scroll.hasClients ? _scroll.offset : 0.0;
+    var row = ((raw + local.dy) / _cellH).floor();
+    var col = (local.dx / _cellW).floor();
+    if (row < 0) row = 0;
+    if (row >= total) row = total - 1;
+    if (col < 0) col = 0;
+    if (col >= _cols) col = _cols - 1;
+    return (row, col);
+  }
+
+  void _onSelStart(LongPressStartDetails d) {
+    final cell = _cellAt(d.localPosition);
+    if (cell == null) return;
+    HapticFeedback.selectionClick();
+    _selectWord(cell);
+  }
+
+  void _onSelMove(LongPressMoveUpdateDetails d) {
+    final cell = _cellAt(d.localPosition);
+    if (cell == null || cell == _selFocus) return;
+    setState(() => _selFocus = cell);
+  }
+
+  /// 长按落在词上就整词选中，落在空格上就选一格。
+  void _selectWord((int, int) cell) {
+    final (row, col0) = cell;
+    final rows = <List<TermCell>>[..._screen.history, ..._screen.grid];
+    if (row < 0 || row >= rows.length) return;
+    final cells = rows[row];
+    if (cells.isEmpty) return;
+    final c = col0.clamp(0, cells.length - 1);
+    bool isWord(int i) => i >= 0 && i < cells.length && cells[i].rune != 0x20;
+    if (!isWord(c)) {
+      setState(() {
+        _selAnchor = (row, c);
+        _selFocus = (row, c);
+      });
+      return;
+    }
+    var s = c;
+    var e = c;
+    while (isWord(s - 1)) {
+      s--;
+    }
+    while (isWord(e + 1)) {
+      e++;
+    }
+    setState(() {
+      _selAnchor = (row, s);
+      _selFocus = (row, e);
+    });
+  }
+
+  /// 把 (锚点, 焦点) 归一成左上 / 右下的顺序。
+  (int, int, int, int) _ordered() {
+    final a = _selAnchor!;
+    final f = _selFocus!;
+    if (a.$1 < f.$1 || (a.$1 == f.$1 && a.$2 <= f.$2)) {
+      return (a.$1, a.$2, f.$1, f.$2);
+    }
+    return (f.$1, f.$2, a.$1, a.$2);
+  }
+
+  /// 某一行被选中的列区间（含端点），没有就返回 null。
+  (int, int)? _selectionForRow(int absRow) {
+    if (!_hasSelection) return null;
+    final (sr, sc, er, ec) = _ordered();
+    if (absRow < sr || absRow > er) return null;
+    if (sr == er) return (sc, ec);
+    if (absRow == sr) return (sc, _cols - 1);
+    if (absRow == er) return (0, ec);
+    return (0, _cols - 1);
+  }
+
+  String _selectionText() {
+    if (!_hasSelection) return '';
+    final (sr, sc, er, ec) = _ordered();
+    final rows = <List<TermCell>>[..._screen.history, ..._screen.grid];
+    final buf = StringBuffer();
+    for (var i = sr; i <= er && i < rows.length; i++) {
+      if (i < 0) continue;
+      final cells = rows[i];
+      final from = i == sr ? sc : 0;
+      final to = i == er ? ec : cells.length - 1;
+      final line = StringBuffer();
+      for (var c = from; c <= to && c < cells.length; c++) {
+        if (c < 0) continue;
+        final cell = cells[c];
+        if (cell.isContinuation) continue;
+        line.writeCharCode(cell.rune);
+      }
+      buf.write(line.toString().trimRight());
+      if (i < er) buf.write('\n');
+    }
+    return buf.toString();
+  }
+
+  void _copySelection() {
+    final text = _selectionText();
+    if (text.isEmpty) {
+      showSnack(context, '没有选中内容');
+      return;
+    }
+    copyText(context, text, '已选内容');
+    setState(() {
+      _selAnchor = null;
+      _selFocus = null;
+    });
+  }
+
+  /* ------------------------------------------------------------------ */
   /* 尺寸                                                                */
   /* ------------------------------------------------------------------ */
 
@@ -400,22 +581,34 @@ class _TerminalTabState extends State<TerminalTab> {
 
   void _scheduleLayout(double width, double height) {
     if (width <= 0 || height <= 0) return;
-    final cols = (width / _cellW).floor().clamp(20, 400);
+    // 只按整列取，画的时候每格定死在 i*cellW，最后一列不会再被挤掉
+    final cols = (width / _cellW).floor().clamp(10, 400);
     final rows = (height / _cellH).floor().clamp(5, 200);
-    if (cols == _cols && rows == _rows) return;
+    final firstLayout = !_hasLayout;
+    if (!firstLayout &&
+        cols == _cols &&
+        rows == _rows &&
+        _screen.cols == cols &&
+        _screen.rows == rows) {
+      return;
+    }
+    _hasLayout = true;
     _cols = cols;
     _rows = rows;
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted) return;
-      setState(() => _screen.resize(cols, rows));
-      // 旋转/键盘弹起时会连着来几次，攒一下再告诉服务端
-      _pendingCols = cols;
-      _pendingRows = rows;
-      _resizeTimer?.cancel();
-      _resizeTimer = Timer(Duration(milliseconds: 180), () {
-        _runner?.resize(_pendingCols, _pendingRows);
+    _screen.resize(cols, rows);
+    if (firstLayout) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) _syncActive();
       });
+      return;
+    }
+    _pendingCols = cols;
+    _pendingRows = rows;
+    _resizeTimer?.cancel();
+    _resizeTimer = Timer(const Duration(milliseconds: 180), () {
+      _runner?.resize(_pendingCols, _pendingRows);
     });
+    _followBottom();
   }
 
   /* ------------------------------------------------------------------ */
@@ -432,21 +625,19 @@ class _TerminalTabState extends State<TerminalTab> {
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           _header(session),
-          SizedBox(height: 8),
-          Expanded(child: _body()),
           if (_showSnippets) ...[
             SizedBox(height: 6),
             _snippetBar(),
           ],
           SizedBox(height: 6),
-          _keyBar(),
-          _inputBar(),
+          Expanded(child: _body()),
         ],
       ),
     );
   }
 
   Widget _placeholder() {
+    final hosts = widget.state.bootstrap?.hosts ?? <HostConfig>[];
     return ListView(
       padding: EdgeInsets.all(14),
       children: [
@@ -459,13 +650,13 @@ class _TerminalTabState extends State<TerminalTab> {
                   Icon(
                     Icons.terminal_outlined,
                     size: 18,
-                    color: KwColors.faint,
+                    color: KwColors.accent,
                   ),
                   SizedBox(width: 8),
                   Text(
-                    '尚未连接',
+                    '尚未建立 SSH 终端会话',
                     style: TextStyle(
-                      fontSize: 13,
+                      fontSize: 14,
                       fontWeight: FontWeight.w600,
                       color: KwColors.text,
                     ),
@@ -474,14 +665,26 @@ class _TerminalTabState extends State<TerminalTab> {
               ),
               SizedBox(height: 10),
               Text(
-                '先在「服务器密钥」里连接一台主机，再回来打开终端。'
-                '终端和密钥管理共用同一条 SSH 会话。',
+                hosts.isEmpty
+                    ? '先在「主机·密钥」页添加并连接一台服务器，即可在此开启交互式 PTY 终端。'
+                    : '在「主机·密钥」页点主机卡片上的「打开终端」，将自动复用同一条 SSH 会话进入终端。',
                 style: TextStyle(
                   fontSize: 12.5,
                   height: 1.6,
                   color: KwColors.dim,
                 ),
               ),
+              if (widget.onOpenHosts != null) ...[
+                SizedBox(height: 14),
+                FilledButton.icon(
+                  onPressed: widget.onOpenHosts,
+                  icon: Icon(Icons.dns_rounded, size: 16),
+                  label: Text(
+                    hosts.isEmpty ? '去添加主机' : '前往主机库 (${hosts.length})',
+                    style: TextStyle(fontSize: 13),
+                  ),
+                ),
+              ],
             ],
           ),
         ),
@@ -490,11 +693,11 @@ class _TerminalTabState extends State<TerminalTab> {
   }
 
   Widget _header(SessionView session) {
-    final state = _closed
+    final String? statusText = _closed
         ? (_error == null ? '终端已结束' : _error!)
         : _termId == null
         ? '正在打开终端…'
-        : '${_screen.cols}×${_screen.rows}';
+        : null;
     final color = _closed
         ? (_error == null ? KwColors.faint : KwColors.danger)
         : _termId == null
@@ -519,7 +722,7 @@ class _TerminalTabState extends State<TerminalTab> {
             ),
           ),
         ),
-        chip(state, color: color),
+        if (statusText != null) chip(statusText, color: color),
         IconButton(
           tooltip: '快捷命令',
           visualDensity: VisualDensity.compact,
@@ -529,6 +732,12 @@ class _TerminalTabState extends State<TerminalTab> {
             size: 18,
             color: _showSnippets ? KwColors.accent : KwColors.dim,
           ),
+        ),
+        IconButton(
+          tooltip: '粘贴',
+          visualDensity: VisualDensity.compact,
+          onPressed: _paste,
+          icon: Icon(Icons.content_paste_rounded, size: 17, color: KwColors.dim),
         ),
         IconButton(
           tooltip: '复制全部',
@@ -590,80 +799,175 @@ class _TerminalTabState extends State<TerminalTab> {
           final grid = screen.grid;
           final cursorX = screen.cursorVisible ? screen.cursorX : -1;
           final cursorY = screen.cursorVisible ? screen.cursorY : -1;
-          return Listener(
-            onPointerDown: (e) {
-              _pointers[e.pointer] = e.position;
-              if (_pointers.length == 2) {
-                final pts = _pointers.values.toList(growable: false);
-                _pinchStartDist = (pts[0] - pts[1]).distance;
-                _pinchStartFont = _fontSize;
+          var visibleGridCount = grid.length;
+          if (!screen.usingAltScreen && grid.isNotEmpty) {
+            var last = (cursorY >= 0 ? cursorY + 1 : 1).clamp(1, grid.length);
+            for (var i = grid.length - 1; i >= last; i--) {
+              if (grid[i].any((c) => !c.isContinuation && c.rune != 0x20)) {
+                last = i + 1;
+                break;
               }
-            },
-            onPointerMove: (e) {
-              if (!_pointers.containsKey(e.pointer)) return;
-              _pointers[e.pointer] = e.position;
-
-              // 双指：按间距比例缩放字号（9~22pt 无级）
-              if (_pointers.length >= 2) {
-                if (_pinchStartDist > 8) {
-                  final pts = _pointers.values.toList(growable: false);
-                  final dist = (pts[0] - pts[1]).distance;
-                  final next = (_pinchStartFont * dist / _pinchStartDist)
-                      .clamp(_minFontSize, _maxFontSize);
-                  if ((next - _fontSize).abs() >= 0.2) {
-                    setState(() => _fontSize = next);
-                    _measure();
+            }
+            visibleGridCount = last;
+          }
+          final selColor = KwColors.accent.withValues(alpha: 0.32);
+          return Stack(
+            fit: StackFit.expand,
+            children: [
+              Listener(
+                onPointerDown: (e) {
+                  _pointers[e.pointer] = e.position;
+                  if (_pointers.length == 2) {
+                    final pts = _pointers.values.toList(growable: false);
+                    _pinchStartDist = (pts[0] - pts[1]).distance;
+                    _pinchStartFont = _fontSize;
                   }
-                }
-                return;
-              }
-
-              // 单指：只在备用屏里把上下滑动翻译成方向键（此时禁止列表滚动）
-              if (!_screen.usingAltScreen) return;
-              _panAccumY += e.delta.dy;
-              const step = 18.0;
-              final app = _screen.applicationCursorKeys;
-              while (_panAccumY.abs() >= step) {
-                final up = _panAccumY > 0;
-                _sendBytes(
-                  utf8.encode(up ? (app ? '\x1bOA' : '\x1b[A') : (app ? '\x1bOB' : '\x1b[B')),
-                );
-                _panAccumY += up ? -step : step;
-              }
-            },
-            onPointerUp: (e) => _pointers.remove(e.pointer),
-            onPointerCancel: (e) => _pointers.remove(e.pointer),
-            child: NotificationListener<ScrollNotification>(
-              onNotification: (notification) {
-                if (notification is ScrollUpdateNotification ||
-                    notification is ScrollEndNotification) {
-                  _stickToBottom = _atBottom();
-                }
-                return false;
-              },
-              child: ListView.builder(
-                controller: _scroll,
-                padding: EdgeInsets.zero,
-                itemExtent: _cellH,
-                // 备用屏里滑动要发方向键，别让列表自己滚
-                physics: _screen.usingAltScreen
-                    ? const NeverScrollableScrollPhysics()
-                    : null,
-                itemCount: history.length + grid.length,
-                itemBuilder: (context, index) {
-                  final isGrid = index >= history.length;
-                  final row = isGrid
-                      ? grid[index - history.length]
-                      : history[index];
-                  final rowCursor = isGrid && index - history.length == cursorY
-                      ? cursorX
-                      : -1;
-                  return _row(row, cursorX: rowCursor);
                 },
+                onPointerMove: (e) {
+                  if (!_pointers.containsKey(e.pointer)) return;
+                  _pointers[e.pointer] = e.position;
+
+                  // 双指：按间距比例缩放字号（9~22pt 无级）
+                  if (_pointers.length >= 2) {
+                    if (_pinchStartDist > 8) {
+                      final pts = _pointers.values.toList(growable: false);
+                      final dist = (pts[0] - pts[1]).distance;
+                      final next = (_pinchStartFont * dist / _pinchStartDist)
+                          .clamp(_minFontSize, _maxFontSize);
+                      if ((next - _fontSize).abs() >= 0.2) {
+                        setState(() => _fontSize = next);
+                        _measure();
+                        _scheduleSavePrefs();
+                      }
+                    }
+                    return;
+                  }
+
+                  // 单指：只在备用屏里把上下滑动翻译成方向键（此时禁止列表滚动）
+                  if (!_screen.usingAltScreen) return;
+                  _panAccumY += e.delta.dy;
+                  const step = 18.0;
+                  final appApp = _screen.applicationCursorKeys;
+                  while (_panAccumY.abs() >= step) {
+                    final isUp = _panAccumY > 0;
+                    _sendBytes(
+                      utf8.encode(
+                        isUp
+                            ? (appApp ? '\x1bOA' : '\x1b[A')
+                            : (appApp ? '\x1bOB' : '\x1b[B'),
+                      ),
+                    );
+                    _panAccumY += isUp ? -step : step;
+                  }
+                },
+                onPointerUp: (e) => _pointers.remove(e.pointer),
+                onPointerCancel: (e) => _pointers.remove(e.pointer),
+                child: GestureDetector(
+                  behavior: HitTestBehavior.opaque,
+                  onTap: _onTerminalTap,
+                  onLongPressStart: _onSelStart,
+                  onLongPressMoveUpdate: _onSelMove,
+                  child: NotificationListener<ScrollNotification>(
+                    onNotification: (notification) {
+                      if (notification is ScrollUpdateNotification ||
+                          notification is ScrollEndNotification) {
+                        _stickToBottom = _atBottom();
+                      }
+                      return false;
+                    },
+                    child: Scrollbar(
+                      controller: _scroll,
+                      thumbVisibility: false,
+                      child: ListView.builder(
+                        controller: _scroll,
+                        padding: EdgeInsets.zero,
+                        itemExtent: _cellH,
+                        // 备用屏里滑动要发方向键，别让列表自己滚
+                        physics: _screen.usingAltScreen
+                            ? const NeverScrollableScrollPhysics()
+                            : null,
+                        itemCount: history.length + visibleGridCount,
+                        itemBuilder: (context, index) {
+                          final isGrid = index >= history.length;
+                          final row = isGrid
+                              ? grid[index - history.length]
+                              : history[index];
+                          final rowCursor =
+                              isGrid && index - history.length == cursorY
+                              ? cursorX
+                              : -1;
+                          final sel = _selectionForRow(index);
+                          return _row(
+                            row,
+                            cursorX: rowCursor,
+                            selStart: sel?.$1 ?? -1,
+                            selEnd: sel?.$2 ?? -1,
+                            selColor: selColor,
+                          );
+                        },
+                      ),
+                    ),
+                  ),
+                ),
               ),
-            ),
+              // 隐藏输入框：只在输入法/硬键盘输入时兜底，肉眼看不到
+              _hiddenField(),
+              if (_hasSelection)
+                Positioned(
+                  right: 10,
+                  bottom: 10,
+                  child: FilledButton.icon(
+                    style: FilledButton.styleFrom(
+                      visualDensity: VisualDensity.compact,
+                      minimumSize: const Size(0, 32),
+                      padding: const EdgeInsets.symmetric(horizontal: 12),
+                    ),
+                    onPressed: _copySelection,
+                    icon: const Icon(Icons.copy_rounded, size: 15),
+                    label: const Text('复制', style: TextStyle(fontSize: 12)),
+                  ),
+                ),
+            ],
           );
         },
+      ),
+    );
+  }
+
+  Widget _hiddenField() {
+    // 放在视口内但完全透明、且不接管触摸：这样输入法才会稳定挂上，
+    // 又不会挡住终端的点击/长按选区。
+    return Positioned(
+      left: 0,
+      top: 0,
+      width: 320,
+      height: 44,
+      child: IgnorePointer(
+        child: Opacity(
+          opacity: 0,
+          child: TextField(
+            controller: _input,
+            focusNode: _focus,
+            maxLines: 1,
+            showCursor: false,
+            enableInteractiveSelection: false,
+            keyboardType: TextInputType.text,
+            textInputAction: TextInputAction.send,
+            autocorrect: false,
+            enableSuggestions: false,
+            textCapitalization: TextCapitalization.none,
+            smartDashesType: SmartDashesType.disabled,
+            smartQuotesType: SmartQuotesType.disabled,
+            style: const TextStyle(color: Colors.transparent, fontSize: 2),
+            cursorColor: Colors.transparent,
+            decoration: const InputDecoration.collapsed(hintText: null),
+            onSubmitted: (_) {
+              _sendBytes(<int>[0x0d]);
+              _resetIme();
+              _focus.requestFocus();
+            },
+          ),
+        ),
       ),
     );
   }
@@ -674,68 +978,34 @@ class _TerminalTabState extends State<TerminalTab> {
     return position.pixels >= position.maxScrollExtent - _cellH * 2;
   }
 
-  Widget _row(List<TermCell> row, {int cursorX = -1}) {
-    final spans = <InlineSpan>[];
-    var i = 0;
-    while (i < row.length) {
-      final cell = row[i];
-      if (cell.isContinuation) {
-        i++;
-        continue;
-      }
-      if (i == cursorX) {
-        spans.add(
-          TextSpan(
-            text: String.fromCharCode(cell.rune),
-            style: _penStyle(cell.pen, cursor: true),
-          ),
-        );
-        i++;
-        continue;
-      }
-      final buffer = StringBuffer()..writeCharCode(cell.rune);
-      var j = i + 1;
-      while (j < row.length &&
-          j != cursorX &&
-          !row[j].isContinuation &&
-          cell.pen.sameStyle(row[j].pen)) {
-        buffer.writeCharCode(row[j].rune);
-        j++;
-      }
-      spans.add(TextSpan(text: buffer.toString(), style: _penStyle(cell.pen)));
-      i = j;
-    }
-    return Text.rich(
-      TextSpan(children: spans),
-      style: _mono,
-      maxLines: 1,
-      softWrap: false,
-      overflow: TextOverflow.clip,
-    );
-  }
-
-  TextStyle _penStyle(TermPen pen, {bool cursor = false}) {
-    var fg = pen.fg >= 0 ? Color(pen.fg) : KwColors.text;
-    var bg = pen.bg >= 0 ? Color(pen.bg) : null;
-    if (pen.inverse) {
-      final swapped = bg ?? KwColors.text;
-      bg = fg;
-      fg = swapped;
-    }
-    if (pen.dim) fg = fg.withValues(alpha: 0.65);
-    if (cursor) {
-      bg = KwColors.accent;
-      fg = KwColors.bg;
-    }
-    return TextStyle(
-      fontFamily: _mono.fontFamily,
-      fontSize: _fontSize,
-      height: _lineHeight,
-      color: fg,
-      backgroundColor: bg,
-      fontWeight: pen.bold ? FontWeight.w700 : FontWeight.w400,
-      decoration: pen.underline ? TextDecoration.underline : null,
-      decorationColor: fg,
+  /// 一行交给 [TerminalRowPainter] 逐格画：每格固定在 `i * cellW`，不依赖字体总宽。
+  Widget _row(
+    List<TermCell> row, {
+    int cursorX = -1,
+    int selStart = -1,
+    int selEnd = -1,
+    Color selColor = const Color(0x554C8DFF),
+  }) {
+    return SizedBox(
+      height: _cellH,
+      width: double.infinity,
+      child: CustomPaint(
+        painter: TerminalRowPainter(
+          row: row,
+          cursorX: cursorX,
+          cellW: _cellW,
+          cellH: _cellH,
+          fontSize: _fontSize,
+          lineHeight: _lineHeight,
+          fontFamily: _mono.fontFamily,
+          defaultFg: KwColors.text,
+          cursorBg: KwColors.accent,
+          cursorFg: KwColors.bg,
+          selStart: selStart,
+          selEnd: selEnd,
+          selColor: selColor,
+        ),
+      ),
     );
   }
 
@@ -771,202 +1041,6 @@ class _TerminalTabState extends State<TerminalTab> {
             ),
           );
         },
-      ),
-    );
-  }
-
-  Widget _keyBar() {
-    final app = _screen.applicationCursorKeys;
-    final up = app ? '\x1bOA' : '\x1b[A';
-    final down = app ? '\x1bOB' : '\x1b[B';
-    final left = app ? '\x1bOD' : '\x1b[D';
-    final right = app ? '\x1bOC' : '\x1b[C';
-    return SizedBox(
-      height: 34,
-      child: ListView(
-        scrollDirection: Axis.horizontal,
-        children: [
-          _key('Esc', () => _sendBytes(<int>[0x1b])),
-          _key('Tab', () => _sendBytes(<int>[0x09])),
-          _modKey('Ctrl', isCtrl: true),
-          _modKey('Alt', isCtrl: false),
-          _key('←', () => _sendBytes(utf8.encode(left)), repeatable: true),
-          _key('↑', () => _sendBytes(utf8.encode(up)), repeatable: true),
-          _key('↓', () => _sendBytes(utf8.encode(down)), repeatable: true),
-          _key('→', () => _sendBytes(utf8.encode(right)), repeatable: true),
-          _key('PgUp', () => _sendBytes(utf8.encode('\x1b[5~')), repeatable: true),
-          _key('PgDn', () => _sendBytes(utf8.encode('\x1b[6~')), repeatable: true),
-          _key('^C', () => _sendBytes(<int>[0x03])),
-          _key('^D', () => _sendBytes(<int>[0x04])),
-          _key('粘贴', _paste, icon: Icons.content_paste_rounded),
-        ],
-      ),
-    );
-  }
-
-  /// Ctrl / Alt 三态按钮：单击在「关 → 单次 → 锁定」之间循环，双击直接锁定。
-  Widget _modKey(String label, {required bool isCtrl}) {
-    final state = isCtrl ? _ctrlMode : _altMode;
-    final locked = state == _ModState.locked;
-    final active = state != _ModState.off;
-    final fg = locked ? KwColors.warn : (active ? KwColors.accent : KwColors.dim);
-    final bg = locked
-        ? KwColors.warn.withValues(alpha: 0.20)
-        : (active ? KwColors.accent.withValues(alpha: 0.18) : KwColors.surface3);
-
-    void cycle({bool lock = false}) {
-      HapticFeedback.selectionClick();
-      setState(() {
-        final _ModState next = lock
-            ? _ModState.locked
-            : switch (state) {
-                _ModState.off => _ModState.once,
-                _ModState.once => _ModState.locked,
-                _ModState.locked => _ModState.off,
-              };
-        if (isCtrl) {
-          _ctrlMode = next;
-        } else {
-          _altMode = next;
-        }
-      });
-    }
-
-    return Padding(
-      padding: EdgeInsets.only(right: 6),
-      child: GestureDetector(
-        onTap: () => cycle(),
-        onDoubleTap: () => cycle(lock: true),
-        child: Container(
-          alignment: Alignment.center,
-          padding: const EdgeInsets.symmetric(horizontal: 10),
-          decoration: BoxDecoration(
-            color: bg,
-            borderRadius: BorderRadius.circular(6),
-            border: Border.all(color: active ? fg : KwColors.border),
-          ),
-          child: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Text(
-                label,
-                style: TextStyle(
-                  fontSize: 12,
-                  fontFamily: 'monospace',
-                  fontWeight: active ? FontWeight.bold : FontWeight.normal,
-                  color: fg,
-                ),
-              ),
-              if (locked) ...[
-                const SizedBox(width: 3),
-                Icon(Icons.lock_rounded, size: 10, color: fg),
-              ],
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-
-  Widget _key(
-    String label,
-    VoidCallback onTap, {
-    IconData? icon,
-    bool repeatable = false,
-  }) {
-    void stopRepeat() {
-      _repeatTimer?.cancel();
-      _repeatTimer = null;
-    }
-
-    return Padding(
-      padding: EdgeInsets.only(right: 6),
-      child: GestureDetector(
-        onTap: () {
-          HapticFeedback.lightImpact();
-          onTap();
-        },
-        onLongPressStart: repeatable
-            ? (_) {
-                HapticFeedback.selectionClick();
-                onTap();
-                stopRepeat();
-                // 按住后先走一格，再以 55ms 间隔连发
-                _repeatTimer = Timer.periodic(
-                  const Duration(milliseconds: 55),
-                  (_) => onTap(),
-                );
-              }
-            : null,
-        onLongPressEnd: repeatable ? (_) => stopRepeat() : null,
-        onLongPressCancel: repeatable ? stopRepeat : null,
-        child: Container(
-          alignment: Alignment.center,
-          padding: EdgeInsets.symmetric(horizontal: icon == null ? 12 : 9),
-          decoration: BoxDecoration(
-            color: KwColors.surface3,
-            borderRadius: BorderRadius.circular(6),
-            border: Border.all(color: KwColors.border),
-          ),
-          child: icon == null
-              ? Text(
-                  label,
-                  style: TextStyle(
-                    fontSize: 12,
-                    fontFamily: 'monospace',
-                    color: KwColors.dim,
-                  ),
-                )
-              : Icon(icon, size: 16, color: KwColors.dim),
-        ),
-      ),
-    );
-  }
-
-  Widget _inputBar() {
-    return Container(
-      margin: EdgeInsets.only(top: 6),
-      padding: EdgeInsets.symmetric(horizontal: 10),
-      decoration: BoxDecoration(
-        color: KwColors.panel,
-        borderRadius: BorderRadius.circular(8),
-        border: Border.all(color: KwColors.border),
-      ),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.center,
-        children: [
-          Icon(Icons.keyboard_rounded, size: 16, color: KwColors.faint),
-          SizedBox(width: 8),
-          Expanded(
-            child: TextField(
-              controller: _input,
-              focusNode: _focus,
-              minLines: 1,
-              maxLines: 3,
-              keyboardType: TextInputType.multiline,
-              textInputAction: TextInputAction.newline,
-              style: _mono,
-              decoration: InputDecoration(
-                hintText: '在这里输入，回车发送',
-                hintStyle: TextStyle(fontSize: 12.5, color: KwColors.faint),
-                border: InputBorder.none,
-                isDense: true,
-                contentPadding: EdgeInsets.symmetric(vertical: 10),
-              ),
-              onChanged: _onInputChanged,
-            ),
-          ),
-          IconButton(
-            tooltip: '粘贴',
-            visualDensity: VisualDensity.compact,
-            onPressed: _paste,
-            icon: Icon(
-              Icons.content_paste_rounded,
-              size: 17,
-              color: KwColors.dim,
-            ),
-          ),
-        ],
       ),
     );
   }

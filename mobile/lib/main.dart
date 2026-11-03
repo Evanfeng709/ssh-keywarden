@@ -1,5 +1,9 @@
+import 'dart:convert';
+import 'dart:io';
+
 import 'package:flutter/material.dart';
 
+import 'src/app_paths.dart';
 import 'src/app_state.dart';
 import 'src/ui/shell.dart';
 import 'src/ui/theme.dart';
@@ -24,14 +28,38 @@ class _KwAppState extends State<KwApp> {
   void initState() {
     super.initState();
     KwColors.select(_palette);
+    _loadSavedPalette();
     _state.init().catchError((Object _) {
       // 错误已经写进 state.error，界面会显示重试入口
     });
   }
 
+  Future<void> _loadSavedPalette() async {
+    try {
+      final dir = await AppPaths.supportDir();
+      final f = File('$dir${Platform.pathSeparator}theme.json');
+      if (!await f.exists()) return;
+      final data = jsonDecode(await f.readAsString());
+      final idx = data is Map ? data['palette'] : null;
+      if (idx is int && idx >= 0 && idx < kwPalettes.length) {
+        KwColors.select(idx);
+        if (mounted) setState(() => _palette = idx);
+      }
+    } catch (_) {}
+  }
+
+  Future<void> _savePalette(int index) async {
+    try {
+      final dir = await AppPaths.supportDir();
+      final f = File('$dir${Platform.pathSeparator}theme.json');
+      await f.writeAsString(jsonEncode({'palette': index}));
+    } catch (_) {}
+  }
+
   void _selectPalette(int index) {
     KwColors.select(index);
     if (mounted) setState(() => _palette = index);
+    _savePalette(index);
   }
 
   @override

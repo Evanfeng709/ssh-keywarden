@@ -7,10 +7,16 @@ import 'common.dart';
 import 'theme.dart';
 
 class KeysTab extends StatefulWidget {
-  const KeysTab({super.key, required this.state, required this.onOpenSync});
+  const KeysTab({
+    super.key,
+    required this.state,
+    required this.onOpenSync,
+    this.onOpenTerminal,
+  });
 
   final AppState state;
   final VoidCallback onOpenSync;
+  final VoidCallback? onOpenTerminal;
 
   @override
   State<KeysTab> createState() => _KeysTabState();
@@ -128,6 +134,12 @@ class _KeysTabState extends State<KeysTab> {
                 ? [
                     _action(Icons.refresh_rounded, '刷新', _refresh),
                     _action(Icons.add_rounded, '新增密钥', _addKey, primary: true),
+                    if (widget.onOpenTerminal != null)
+                      _action(
+                        Icons.terminal_rounded,
+                        '终端',
+                        widget.onOpenTerminal!,
+                      ),
                     _action(Icons.history_rounded, '备份', _openBackups),
                     _action(
                       Icons.link_off_rounded,
@@ -203,7 +215,7 @@ class _KeysTabState extends State<KeysTab> {
   }
 
   /* ------------------------------------------------------------------ */
-  /* 未连接                                                              */
+  /* 未连接（Termius 风格主机保险库列表）                               */
   /* ------------------------------------------------------------------ */
 
   Widget _disconnected(HostConfig? host) {
@@ -211,53 +223,88 @@ class _KeysTabState extends State<KeysTab> {
     return ListView(
       padding: EdgeInsets.all(14),
       children: [
-        panel(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                hosts.isEmpty ? '先添加一台服务器' : '选择主机后点「连接」',
-                style: TextStyle(
-                  fontSize: 15,
-                  fontWeight: FontWeight.w600,
-                  color: KwColors.text,
-                ),
-              ),
-              SizedBox(height: 8),
-              Text(
-                hosts.isEmpty
-                    ? '手机端不读 ~/.ssh/config。可以手填主机，或在「密钥包·同步」登录微软账号，把桌面端的密钥库拉下来。'
-                    : host == null
-                    ? ''
-                    : '下次连接：${host.endpoint}\n'
-                          '登录私钥：${host.identityFile.isEmpty ? '未绑定（用密码）' : host.identityFile}',
-                style: TextStyle(
-                  fontSize: 12,
-                  height: 1.6,
-                  color: KwColors.dim,
-                ),
-              ),
-              SizedBox(height: 14),
-              Row(
-                children: [
-                  if (host != null)
-                    FilledButton.icon(
-                      onPressed: () => _connect(host),
-                      icon: Icon(Icons.link_rounded, size: 16),
-                      label: Text('连接', style: TextStyle(fontSize: 13)),
-                    ),
-                  if (host != null) SizedBox(width: 10),
-                  OutlinedButton.icon(
-                    onPressed: _addHost,
-                    icon: Icon(Icons.add_rounded, size: 16),
-                    label: Text('添加主机', style: TextStyle(fontSize: 13)),
+        if (hosts.isEmpty)
+          panel(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  '先添加一台服务器',
+                  style: TextStyle(
+                    fontSize: 15,
+                    fontWeight: FontWeight.w600,
+                    color: KwColors.text,
                   ),
-                ],
-              ),
-            ],
+                ),
+                SizedBox(height: 8),
+                Text(
+                  '手机端不读 ~/.ssh/config。可以手填主机，或在「密钥包·同步」登录微软账号，把桌面端的密钥库拉下来。',
+                  style: TextStyle(
+                    fontSize: 12,
+                    height: 1.6,
+                    color: KwColors.dim,
+                  ),
+                ),
+                SizedBox(height: 14),
+                Row(
+                  children: [
+                    FilledButton.icon(
+                      onPressed: _addHost,
+                      icon: Icon(Icons.add_rounded, size: 16),
+                      label: Text('添加主机', style: TextStyle(fontSize: 13)),
+                    ),
+                    SizedBox(width: 10),
+                    OutlinedButton.icon(
+                      onPressed: widget.onOpenSync,
+                      icon: Icon(Icons.cloud_sync_rounded, size: 16),
+                      label: Text('云同步', style: TextStyle(fontSize: 13)),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          )
+        else ...[
+          Padding(
+            padding: EdgeInsets.only(bottom: 8),
+            child: Row(
+              children: [
+                Text(
+                  '主机库 (${hosts.length})',
+                  style: TextStyle(
+                    fontSize: 11.5,
+                    fontWeight: FontWeight.w700,
+                    letterSpacing: 0.4,
+                    color: KwColors.dim,
+                  ),
+                ),
+                Spacer(),
+                InkWell(
+                  onTap: _addHost,
+                  borderRadius: BorderRadius.circular(6),
+                  child: Padding(
+                    padding: EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                    child: Text(
+                      '+ 新增主机',
+                      style: TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.w600,
+                        color: KwColors.accent,
+                      ),
+                    ),
+                  ),
+                ),
+              ],
+            ),
           ),
-        ),
-        SizedBox(height: 12),
+          ...hosts.map(
+            (h) => Padding(
+              padding: EdgeInsets.only(bottom: 10),
+              child: _hostVaultCard(h, isSelected: h.id == host?.id),
+            ),
+          ),
+        ],
+        SizedBox(height: 6),
         panel(
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
@@ -285,6 +332,122 @@ class _KeysTabState extends State<KeysTab> {
           ),
         ),
       ],
+    );
+  }
+
+  Widget _hostVaultCard(HostConfig h, {bool isSelected = false}) {
+    final hasKey = h.identityFile.isNotEmpty;
+    final keyBadge = hasKey
+        ? h.identityFile.split(RegExp(r'[/\\]')).last
+        : '密码登录';
+    return Container(
+      padding: EdgeInsets.all(13),
+      decoration: BoxDecoration(
+        color: KwColors.panel,
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(
+          color: isSelected
+              ? KwColors.accent.withValues(alpha: 0.55)
+              : KwColors.border,
+        ),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Container(
+                width: 34,
+                height: 34,
+                decoration: BoxDecoration(
+                  color: KwColors.accentSoft,
+                  borderRadius: BorderRadius.circular(9),
+                  border: Border.all(
+                    color: KwColors.accent.withValues(alpha: 0.35),
+                  ),
+                ),
+                alignment: Alignment.center,
+                child: Icon(
+                  Icons.dns_rounded,
+                  size: 17,
+                  color: KwColors.accent,
+                ),
+              ),
+              SizedBox(width: 10),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      h.label,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        fontSize: 14,
+                        fontWeight: FontWeight.w600,
+                        color: KwColors.text,
+                      ),
+                    ),
+                    SizedBox(height: 2),
+                    Text(
+                      h.endpoint,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        fontSize: 11.5,
+                        fontFamily: 'monospace',
+                        color: KwColors.dim,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              chip(
+                hasKey ? '🗝️ $keyBadge' : '🔒 $keyBadge',
+                color: hasKey ? KwColors.ok : KwColors.dim,
+                background: hasKey ? KwColors.okSoft : KwColors.surface3,
+              ),
+            ],
+          ),
+          SizedBox(height: 10),
+          Row(
+            children: [
+              Expanded(
+                child: OutlinedButton.icon(
+                  style: OutlinedButton.styleFrom(
+                    visualDensity: VisualDensity.compact,
+                    side: BorderSide(
+                      color: KwColors.accent.withValues(alpha: 0.45),
+                    ),
+                  ),
+                  onPressed: state.busy
+                      ? null
+                      : () {
+                          setState(() => _hostId = h.id);
+                          _connect(h);
+                        },
+                  icon: Icon(Icons.vpn_key_outlined, size: 15),
+                  label: Text('密钥管理', style: TextStyle(fontSize: 12)),
+                ),
+              ),
+              SizedBox(width: 8),
+              Expanded(
+                child: FilledButton.tonalIcon(
+                  style: FilledButton.styleFrom(
+                    visualDensity: VisualDensity.compact,
+                  ),
+                  onPressed: state.busy
+                      ? null
+                      : () {
+                          setState(() => _hostId = h.id);
+                          _connect(h, openTerminal: true);
+                        },
+                  icon: Icon(Icons.terminal_rounded, size: 15),
+                  label: Text('打开终端', style: TextStyle(fontSize: 12)),
+                ),
+              ),
+            ],
+          ),
+        ],
+      ),
     );
   }
 
@@ -699,7 +862,7 @@ class _KeysTabState extends State<KeysTab> {
   /* 连接                                                                */
   /* ------------------------------------------------------------------ */
 
-  Future<void> _connect(HostConfig? host) async {
+  Future<void> _connect(HostConfig? host, {bool openTerminal = false}) async {
     if (host == null) {
       showSnack(context, '先添加一台主机', danger: true);
       return;
@@ -718,6 +881,9 @@ class _KeysTabState extends State<KeysTab> {
         if (!mounted) return;
         Navigator.of(context).pop();
         showSnack(context, '已连接 ${host.endpoint}', ok: true);
+        if (openTerminal) {
+          widget.onOpenTerminal?.call();
+        }
       } on KwException catch (e) {
         if (!mounted) return;
         if (e.isHostKeyUnknown || e.isHostKeyChanged) {

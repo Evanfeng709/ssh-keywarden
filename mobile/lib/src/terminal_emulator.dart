@@ -164,6 +164,13 @@ class TerminalScreen {
     _wrapPending = false;
   }
 
+  static bool _isRowBlank(List<TermCell> row) {
+    for (final c in row) {
+      if (!c.isContinuation && c.rune != 0x20) return false;
+    }
+    return true;
+  }
+
   List<List<TermCell>> _reflow(
     List<List<TermCell>> source, {
     required bool toHistory,
@@ -171,9 +178,19 @@ class TerminalScreen {
     final shaped = source
         .map((row) => _reshapeRow(row, _cols))
         .toList(growable: true);
+    // 软键盘弹起导致高度缩小时：优先裁掉底部光标下方的空白行，
+    // 避免把顶部的提示符连同中间十几行空白一起挤进 history 造成断层与重复提示符。
     while (shaped.length > _rows) {
+      final minKeep = toHistory ? _cy : 0;
+      if (shaped.length - 1 > minKeep && _isRowBlank(shaped.last)) {
+        shaped.removeLast();
+        continue;
+      }
       final popped = shaped.removeAt(0);
-      if (toHistory) _pushHistory(popped);
+      if (toHistory) {
+        _pushHistory(popped);
+        if (_cy > 0) _cy--;
+      }
     }
     while (shaped.length < _rows) {
       shaped.add(_blankRow(_cols));
@@ -886,23 +903,25 @@ class _Parser {
 
 /// 256 色 → 0xRRGGBB。0-15 固定色板，16-231 是 6x6x6，232-255 灰阶。
 int palette(int index) {
+  // 0-15 固定色板：靠 Termius 默认深色（Tomorrow Night）那一套，
+  // 亮色/深色主题下都还看得清；默认前景/背景仍由 App 主题决定。
   const basic = <int>[
-    0x6c7079,
-    0xe06b6b,
-    0x5fbf7a,
-    0xd9b45a,
-    0x5a9de0,
-    0xb07ad9,
-    0x4fbfbf,
-    0xc9ccd1,
-    0x8b9099,
-    0xf08a8a,
-    0x7ad994,
-    0xe8c96b,
-    0x7ab3f0,
-    0xc994f0,
-    0x7ae0e0,
-    0xf2f4f8,
+    0x1d1f21, // black
+    0xcc6666, // red
+    0xb5bd68, // green
+    0xf0c674, // yellow
+    0x81a2be, // blue
+    0xb294bb, // magenta
+    0x8abeb7, // cyan
+    0xc5c8c6, // white
+    0x969896, // bright black
+    0xd54e53, // bright red
+    0xb9ca4a, // bright green
+    0xe7c547, // bright yellow
+    0x7aa6da, // bright blue
+    0xc397d8, // bright magenta
+    0x70c0b1, // bright cyan
+    0xf0f0f0, // bright white
   ];
   if (index >= 0 && index < 16) return basic[index];
   if (index >= 16 && index < 232) {
