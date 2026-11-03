@@ -35,6 +35,48 @@ const AUTHORIZED: &str = "/home/kwtest/.ssh/authorized_keys";
 const SSHD_CONFIG: &str = "/etc/ssh/sshd_config";
 const DEADLINE: Duration = Duration::from_secs(15);
 
+/// 监控采样命令的输出夹具：两段 /proc/stat 与 /proc/net/dev 让差值可算。
+const MONITOR_FIXTURE: &str = r#"@@OS
+Ubuntu 24.04.1 LTS
+@@UPTIME
+3690456.78 1234567.89
+@@LOAD
+0.42 0.35 0.28 1/187 12345
+@@STAT1
+cpu  1000 0 500 8500 0 0 0 0 0 0
+cpu0 500 0 250 4250 0 0 0 0 0 0
+cpu1 500 0 250 4250 0 0 0 0 0 0
+@@MEM
+MemTotal:       16000000 kB
+MemFree:         2000000 kB
+MemAvailable:    6000000 kB
+Buffers:          500000 kB
+Cached:          2500000 kB
+SwapTotal:       2000000 kB
+SwapFree:        1600000 kB
+@@NET1
+Inter-|   Receive                                                |  Transmit
+ face |bytes    packets errs drop fifo frame compressed multicast|bytes    packets errs drop fifo colls carrier compressed
+    lo: 999999 0 0 0 0 0 0 0 999999 0 0 0 0 0 0 0
+  eth0: 1000 0 0 0 0 0 0 0 500 0 0 0 0 0 0 0
+@@STAT2
+cpu  1600 0 700 9700 0 0 0 0 0 0
+cpu0 800 0 350 4850 0 0 0 0 0 0
+cpu1 800 0 350 4850 0 0 0 0 0 0
+@@NET2
+Inter-|   Receive                                                |  Transmit
+ face |bytes    packets errs drop fifo frame compressed multicast|bytes    packets errs drop fifo colls carrier compressed
+    lo: 1099999 0 0 0 0 0 0 0 1099999 0 0 0 0 0 0 0
+  eth0: 301000 0 0 0 0 0 0 0 1500 0 0 0 0 0 0 0
+@@DF
+Filesystem     1-blocks      Used Available Capacity Mounted on
+/dev/sda1      1000000000 400000000 500000000      40% /
+@@PS
+  1234 dockerd          12.4  2.1
+  2345 node              8.7  3.4
+@@END
+"#;
+
 // 不把 Result 的错误、响应体或凭据带进测试失败日志。
 fn must<T, E>(result: Result<T, E>) -> T {
     result.unwrap_or_else(|_| panic!("test operation failed"))
@@ -141,6 +183,9 @@ fn quoted(cmd: &str, n: usize) -> String {
 impl FakeFs {
     fn exec(&mut self, cmd: &str, stdin: &[u8]) -> Exec {
         let t = cmd.trim();
+        if t.contains("@@OS") {
+            return Exec::ok(MONITOR_FIXTURE);
+        }
         match t {
             "printf \"%s\" \"$HOME\"" | "getent passwd \"$(id -u)\" | cut -d: -f6" => {
                 return Exec::ok(HOME)
@@ -836,6 +881,29 @@ fn auth(key: &Key, authorized: bool, accepted: bool) -> Event {
         authorized,
         accepted,
     }
+}
+
+#[tokio::test]
+async fn monitor_snapshot_collects_linux_metrics_over_ssh() {
+    let env = Env::start("").await;
+    let key = env.keypair("monitor", None);
+    env.authorize(&[&key]).await;
+    let session = connect(&env, json!({ "identityFile": key.path, "withKeys": false })).await;
+    let sid = text(&session["sid"]);
+    let value = must(kw_server::monitor::snapshot(&env.state, &sid).await);
+    let snap: kw_ssh::metrics::MonitorSnapshot = must(serde_json::from_value(value));
+    assert_eq!(snap.os, "Ubuntu 24.04.1 LTS");
+    assert!(snap.uptime_secs > 0.0);
+    assert_eq!(snap.cores, 2);
+    assert!(snap.cpu.total > 0.0 && snap.cpu.total < 100.0);
+    assert_eq!(snap.cpu.per_core.len(), 2);
+    assert_eq!(snap.load.one, 0.42);
+    assert_eq!(snap.load.processes, 187);
+    assert!(snap.mem.total > 0.0 && snap.mem.used > 0.0);
+    assert_eq!(snap.disks.len(), 1);
+    assert_eq!(snap.disks[0].mount, "/");
+    assert_eq!(snap.processes.len(), 2);
+    assert!(snap.net.rx_bytes_per_sec > 0.0);
 }
 
 fn commit(keys: &[&Key]) -> Event {

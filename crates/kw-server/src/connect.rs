@@ -10,6 +10,7 @@ use serde_json::{json, Value};
 
 use kw_core::Secret;
 use kw_keys::find_private_key_by_fingerprint;
+use kw_ssh::proxy::{connect_through, ProxyConfig, ProxyKind};
 use kw_ssh::session::{connect, SshConfig};
 use kw_store::Host;
 
@@ -31,6 +32,31 @@ pub struct ConnectBody {
     pub password: Option<Secret>,
     pub trust_fingerprint: Option<String>,
     pub with_keys: Option<bool>,
+    /// 只有「临时连接 / 弹窗补输代理密码」才需要带；已保存主机默认读主机配置与 `proxy-auth.json`。
+    #[serde(flatten)]
+    pub proxy: ProxyRequest,
+}
+
+/// 代理参数。字段全为 `None` = 沿用已保存主机的代理设置。
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ProxyRequest {
+    pub proxy_kind: Option<String>,
+    pub proxy_host: Option<String>,
+    pub proxy_port: Option<u16>,
+    pub proxy_username: Option<String>,
+    pub proxy_password: Option<Secret>,
+}
+
+/// 「测试代理」：只握手到目标地址，不登录 SSH。
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ProxyProbeBody {
+    pub host_id: Option<String>,
+    pub host: Option<String>,
+    pub port: Option<u16>,
+    #[serde(flatten)]
+    pub proxy: ProxyRequest,
 }
 
 pub(crate) fn non_empty(v: &Option<String>) -> Option<&str> {
@@ -59,7 +85,11 @@ fn resolve_identity_file(state: &AppState, host: &Host, requested: Option<&str>)
 }
 
 /// 保存过的主机按 id 取；否则用请求里的字段拼一个「临时连接」。
-fn resolve_target(state: &AppState, body: &ConnectBody) -> Result<Target, ApiError> {
+fn resolve_target(
+    state: &AppState,
+    body: &ConnectBody,
+) -> Result<(Target, Option<Host>), ApiError> {
+    let mut saved_host = None;
     let target = if let Some(id) = non_empty(&body.host_id) {
         let host = state
             .store
@@ -69,15 +99,17 @@ fn resolve_target(state: &AppState, body: &ConnectBody) -> Result<Target, ApiErr
             .ok_or_else(|| ApiError::bad("主机配置不存在，请刷新页面"))?;
         // 凭据弹窗是在已保存主机的基础上重连：必须保留 id，否则会话变成「临时连接」
         let identity_file = resolve_identity_file(state, &host, body.identity_file.as_deref());
-        Target {
-            id: host.id,
-            name: host.name,
-            host: host.host,
+        let target = Target {
+            id: host.id.clone(),
+            name: host.name.clone(),
+            host: host.host.clone(),
             port: host.port,
-            username: host.username,
+            username: host.username.clone(),
             identity_file,
-            remote_path: host.remote_path,
-        }
+            remote_path: host.remote_path.clone(),
+        };
+        saved_host = Some(host);
+        target
     } else {
         Target {
             id: String::new(),
@@ -98,7 +130,92 @@ fn resolve_target(state: &AppState, body: &ConnectBody) -> Result<Target, ApiErr
     if target.username.is_empty() {
         return Err(ApiError::bad("用户名不能为空"));
     }
-    Ok(target)
+    Ok((target, saved_host))
+}
+
+/// 合并「请求里临时填的代理」与「主机里保存的代理」。
+///
+/// 返回 `None` = 不走代理。代理密码优先用请求里输入的，其次用本机
+/// `data/proxy-auth.json` 记住的那份（按主机 id 存，不参与同步）。
+pub fn resolve_proxy(
+    state: &AppState,
+    req: &ProxyRequest,
+    saved: Option<&Host>,
+) -> Result<Option<ProxyConfig>, ApiError> {
+    let kind_text = non_empty(&req.proxy_kind)
+        .map(str::to_string)
+        .or_else(|| saved.map(|h| h.proxy_kind.clone()))
+        .unwrap_or_default();
+    if kind_text.trim().is_empty() {
+        return Ok(None);
+    }
+    let kind = ProxyKind::parse(&kind_text)
+        .ok_or_else(|| ApiError::bad(format!("不支持的代理类型：{kind_text}")))?;
+
+    let host = non_empty(&req.proxy_host)
+        .map(str::to_string)
+        .or_else(|| saved.map(|h| h.proxy_host.trim().to_string()))
+        .unwrap_or_default();
+    if host.is_empty() {
+        return Ok(None);
+    }
+    let port = req
+        .proxy_port
+        .or_else(|| saved.map(Host::proxy_port_or_default))
+        .filter(|p| *p > 0)
+        .unwrap_or(1080);
+    let username = non_empty(&req.proxy_username)
+        .map(str::to_string)
+        .or_else(|| {
+            saved
+                .map(|h| h.proxy_username.trim().to_string())
+                .filter(|s| !s.is_empty())
+        });
+    let password = match &req.proxy_password {
+        Some(secret) if !secret.expose().is_empty() => {
+            Some(Secret::new(secret.expose().to_string()))
+        }
+        _ => saved
+            .and_then(|h| state.store.proxy_password(&h.id))
+            .map(Secret::new),
+    };
+
+    Ok(Some(ProxyConfig {
+        kind,
+        host,
+        port,
+        username,
+        password,
+    }))
+}
+
+/// 只做代理握手（到目标 SSH 端口），不进行 SSH 登录。
+pub async fn test_proxy(state: &AppState, body: ProxyProbeBody) -> Result<Value, ApiError> {
+    let saved = non_empty(&body.host_id)
+        .and_then(|id| state.store.list_hosts().into_iter().find(|h| h.id == id));
+    let proxy = resolve_proxy(state, &body.proxy, saved.as_ref())?
+        .ok_or_else(|| ApiError::bad("还没有配置代理"))?;
+    let target_host = non_empty(&body.host)
+        .map(str::to_string)
+        .or_else(|| saved.as_ref().map(|h| h.host.clone()))
+        .unwrap_or_default();
+    if target_host.is_empty() {
+        return Err(ApiError::bad("请先填写主机地址"));
+    }
+    let target_port = body
+        .port
+        .or_else(|| saved.as_ref().map(|h| h.port))
+        .filter(|p| *p > 0)
+        .unwrap_or(22);
+
+    let started = std::time::Instant::now();
+    connect_through(&proxy, &target_host, target_port)
+        .await
+        .map_err(|e| ApiError::bad(e.to_string()))?;
+    Ok(json!({
+        "ms": started.elapsed().as_millis() as u64,
+        "kind": proxy.kind.label(),
+    }))
 }
 
 fn read_identity(path: &str) -> Result<Option<Secret>, ApiError> {
@@ -129,7 +246,9 @@ pub async fn session_by_sid(state: &AppState, sid: &str) -> Result<Arc<Session>,
 
 /// 连接并读取远端状态；成功返回与旧版 `sessionPayload` 同形的 JSON。
 pub async fn open(state: &Arc<AppState>, body: ConnectBody) -> Result<Value, ApiError> {
-    let target = resolve_target(state, &body)?;
+    let (target, saved_host) = resolve_target(state, &body)?;
+    let proxy = resolve_proxy(state, &body.proxy, saved_host.as_ref())?;
+    let session_proxy = proxy.clone();
     let with_keys = body.with_keys.unwrap_or(true);
     let mut cfg = SshConfig {
         host: target.host.clone(),
@@ -139,6 +258,7 @@ pub async fn open(state: &Arc<AppState>, body: ConnectBody) -> Result<Value, Api
         passphrase: body.passphrase.filter(|s| !s.is_empty()),
         password: body.password.filter(|s| !s.is_empty()),
         trust_fingerprint: non_empty(&body.trust_fingerprint).map(str::to_string),
+        proxy,
     };
 
     if cfg.private_key.is_none() && cfg.password.is_none() {
@@ -199,6 +319,7 @@ pub async fn open(state: &Arc<AppState>, body: ConnectBody) -> Result<Value, Api
         uuid::Uuid::new_v4().to_string(),
         client,
         target,
+        session_proxy,
         remote,
         server,
         auth_method,

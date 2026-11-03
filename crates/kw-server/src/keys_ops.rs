@@ -388,6 +388,7 @@ async fn switch_host_identity(
             identity_file: Some(private_key_path.to_string()),
             identity_fingerprint: Some(fingerprint.to_string()),
             remote_path: Some(host.remote_path),
+            ..Default::default()
         })
         .map_err(|e| ApiError::bad(e.to_string()))?;
     session.target.write().await.identity_file = private_key_path.to_string();
@@ -437,6 +438,7 @@ async fn maybe_switch_identity(
             .and_then(Value::as_str)
             .map(Secret::new),
         password: None,
+        proxy: session.proxy.clone(),
         trust_fingerprint: None,
     };
     match verify_login(&cfg, Arc::clone(&state.known_hosts)).await {
@@ -604,6 +606,7 @@ pub async fn replace_key(
                 .and_then(Value::as_str)
                 .map(Secret::new),
             password: None,
+            proxy: session.proxy.clone(),
             trust_fingerprint: None,
         };
         match verify_login(&cfg, Arc::clone(&state.known_hosts)).await {
@@ -1010,7 +1013,10 @@ mod tests {
             generated_key_label(&json!({}), "备注名", "host.example"),
             "备注名"
         );
-        assert_eq!(generated_key_label(&json!({}), "", "host.example"), "host.example");
+        assert_eq!(
+            generated_key_label(&json!({}), "", "host.example"),
+            "host.example"
+        );
     }
 
     #[test]

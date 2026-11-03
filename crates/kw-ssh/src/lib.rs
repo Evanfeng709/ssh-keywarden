@@ -3,7 +3,10 @@
 //! 手机端只依赖 `kw-ssh` + `kw-keys`，不碰桌面才有的存储/路由。
 
 pub mod known_hosts;
+pub mod metrics;
+pub mod proxy;
 pub mod session;
+pub mod sftp;
 pub mod sshd;
 pub mod terminal;
 pub mod util;

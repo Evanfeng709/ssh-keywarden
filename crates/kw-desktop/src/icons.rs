@@ -16,10 +16,17 @@ pub enum Icon {
     Edit,
     Search,
     Folder,
+    File,
+    Link,
     Refresh,
     Trash,
     Copy,
     Theme,
+    Pulse,
+    Cpu,
+    Memory,
+    Load,
+    Network,
     WinMin,
     WinMax,
     WinRestore,
@@ -36,12 +43,22 @@ pub fn draw_icon(painter: &Painter, center: Pos2, size: f32, icon: Icon, color: 
             // 上下两层服务器机架 + 状态指示灯
             let w = size * 0.82;
             let h = size * 0.32;
-            let top_rect = Rect::from_center_size(Pos2::new(center.x, center.y - r * 0.42), Vec2::new(w, h));
-            let bot_rect = Rect::from_center_size(Pos2::new(center.x, center.y + r * 0.42), Vec2::new(w, h));
+            let top_rect =
+                Rect::from_center_size(Pos2::new(center.x, center.y - r * 0.42), Vec2::new(w, h));
+            let bot_rect =
+                Rect::from_center_size(Pos2::new(center.x, center.y + r * 0.42), Vec2::new(w, h));
             painter.rect_stroke(top_rect, CornerRadius::same(2), stroke, StrokeKind::Inside);
             painter.rect_stroke(bot_rect, CornerRadius::same(2), stroke, StrokeKind::Inside);
-            painter.circle_filled(Pos2::new(top_rect.min.x + 3.5, top_rect.center().y), 1.3, color);
-            painter.circle_filled(Pos2::new(bot_rect.min.x + 3.5, bot_rect.center().y), 1.3, color);
+            painter.circle_filled(
+                Pos2::new(top_rect.min.x + 3.5, top_rect.center().y),
+                1.3,
+                color,
+            );
+            painter.circle_filled(
+                Pos2::new(bot_rect.min.x + 3.5, bot_rect.center().y),
+                1.3,
+                color,
+            );
         }
         Icon::Terminal => {
             // `>_` 终端符号
@@ -62,20 +79,38 @@ pub fn draw_icon(painter: &Painter, center: Pos2, size: f32, icon: Icon, color: 
         Icon::Plus => {
             let d = r * 0.62;
             painter.line_segment(
-                [Pos2::new(center.x - d, center.y), Pos2::new(center.x + d, center.y)],
+                [
+                    Pos2::new(center.x - d, center.y),
+                    Pos2::new(center.x + d, center.y),
+                ],
                 stroke,
             );
             painter.line_segment(
-                [Pos2::new(center.x, center.y - d), Pos2::new(center.x, center.y + d)],
+                [
+                    Pos2::new(center.x, center.y - d),
+                    Pos2::new(center.x, center.y + d),
+                ],
                 stroke,
             );
         }
         Icon::Cloud => {
             // 清晰云朵轮廓（底部平直 + 三圆弧）
             let y_base = center.y + r * 0.42;
-            painter.circle_stroke(Pos2::new(center.x - r * 0.35, center.y + r * 0.08), r * 0.34, thin);
-            painter.circle_stroke(Pos2::new(center.x + r * 0.05, center.y - r * 0.12), r * 0.42, thin);
-            painter.circle_stroke(Pos2::new(center.x + r * 0.42, center.y + r * 0.12), r * 0.30, thin);
+            painter.circle_stroke(
+                Pos2::new(center.x - r * 0.35, center.y + r * 0.08),
+                r * 0.34,
+                thin,
+            );
+            painter.circle_stroke(
+                Pos2::new(center.x + r * 0.05, center.y - r * 0.12),
+                r * 0.42,
+                thin,
+            );
+            painter.circle_stroke(
+                Pos2::new(center.x + r * 0.42, center.y + r * 0.12),
+                r * 0.30,
+                thin,
+            );
             painter.line_segment(
                 [
                     Pos2::new(center.x - r * 0.55, y_base),
@@ -150,11 +185,17 @@ pub fn draw_icon(painter: &Painter, center: Pos2, size: f32, icon: Icon, color: 
             let shackle_top = center.y - r * 0.62;
             let sx = size * 0.18;
             painter.line_segment(
-                [Pos2::new(center.x - sx, body.min.y), Pos2::new(center.x - sx, shackle_top + 2.0)],
+                [
+                    Pos2::new(center.x - sx, body.min.y),
+                    Pos2::new(center.x - sx, shackle_top + 2.0),
+                ],
                 thin,
             );
             painter.line_segment(
-                [Pos2::new(center.x + sx, body.min.y), Pos2::new(center.x + sx, shackle_top + 2.0)],
+                [
+                    Pos2::new(center.x + sx, body.min.y),
+                    Pos2::new(center.x + sx, shackle_top + 2.0),
+                ],
                 thin,
             );
             painter.line_segment(
@@ -198,7 +239,8 @@ pub fn draw_icon(painter: &Painter, center: Pos2, size: f32, icon: Icon, color: 
         Icon::Folder => {
             let w = size * 0.78;
             let h = size * 0.56;
-            let body = Rect::from_center_size(Pos2::new(center.x, center.y + r * 0.08), Vec2::new(w, h));
+            let body =
+                Rect::from_center_size(Pos2::new(center.x, center.y + r * 0.08), Vec2::new(w, h));
             painter.rect_stroke(body, CornerRadius::same(2), stroke, StrokeKind::Inside);
             painter.line_segment(
                 [
@@ -208,9 +250,55 @@ pub fn draw_icon(painter: &Painter, center: Pos2, size: f32, icon: Icon, color: 
                 stroke,
             );
         }
+        Icon::File => {
+            // 文档轮廓 + 右上折角
+            let w = size * 0.58;
+            let h = size * 0.72;
+            let body = Rect::from_center_size(center, Vec2::new(w, h));
+            painter.rect_stroke(body, CornerRadius::same(2), thin, StrokeKind::Inside);
+            let fold = size * 0.18;
+            painter.line_segment(
+                [
+                    Pos2::new(body.max.x - fold, body.min.y),
+                    Pos2::new(body.max.x, body.min.y + fold),
+                ],
+                thin,
+            );
+            painter.line_segment(
+                [
+                    Pos2::new(body.max.x - fold, body.min.y),
+                    Pos2::new(body.max.x - fold, body.min.y + fold),
+                ],
+                thin,
+            );
+            painter.line_segment(
+                [
+                    Pos2::new(body.max.x - fold, body.min.y + fold),
+                    Pos2::new(body.max.x, body.min.y + fold),
+                ],
+                thin,
+            );
+        }
+        Icon::Link => {
+            // 两节斜向链条
+            let a = Rect::from_center_size(
+                Pos2::new(center.x - r * 0.26, center.y + r * 0.26),
+                Vec2::new(size * 0.44, size * 0.26),
+            );
+            let b = Rect::from_center_size(
+                Pos2::new(center.x + r * 0.26, center.y - r * 0.26),
+                Vec2::new(size * 0.44, size * 0.26),
+            );
+            painter.rect_stroke(a, CornerRadius::same(4), thin, StrokeKind::Inside);
+            painter.rect_stroke(b, CornerRadius::same(4), thin, StrokeKind::Inside);
+        }
         Icon::Refresh => {
             painter.circle_stroke(center, r * 0.58, stroke);
-            painter.circle_filled(Pos2::new(center.x + r * 0.55, center.y - r * 0.18), 2.0, color);
+            painter.circle_filled(
+                Pos2::new(center.x + r * 0.55, center.y - r * 0.18),
+                2.0,
+                color,
+            );
         }
         Icon::Trash => {
             let body = Rect::from_center_size(
@@ -249,9 +337,128 @@ pub fn draw_icon(painter: &Painter, center: Pos2, size: f32, icon: Icon, color: 
                 thin,
             );
         }
+        Icon::Pulse => {
+            // 心电波形：平 → 下探 → 尖峰 → 回落 → 平
+            let pts = [
+                (-0.82, 0.0),
+                (-0.52, 0.0),
+                (-0.30, 0.62),
+                (0.02, -0.92),
+                (0.32, 0.26),
+                (0.82, 0.26),
+            ];
+            for pair in pts.windows(2) {
+                painter.line_segment(
+                    [
+                        Pos2::new(center.x + r * pair[0].0, center.y + r * pair[0].1),
+                        Pos2::new(center.x + r * pair[1].0, center.y + r * pair[1].1),
+                    ],
+                    thin,
+                );
+            }
+        }
+        Icon::Cpu => {
+            let body = Rect::from_center_size(center, Vec2::splat(size * 0.58));
+            painter.rect_stroke(
+                body,
+                CornerRadius::same(2),
+                Stroke::new(1.3_f32, color),
+                StrokeKind::Inside,
+            );
+            for k in [-0.20_f32, 0.0, 0.20] {
+                let x = center.x + size * k;
+                painter.line_segment(
+                    [Pos2::new(x, body.min.y - 2.0), Pos2::new(x, body.min.y)],
+                    thin,
+                );
+                painter.line_segment(
+                    [Pos2::new(x, body.max.y), Pos2::new(x, body.max.y + 2.0)],
+                    thin,
+                );
+                let y = center.y + size * k;
+                painter.line_segment(
+                    [Pos2::new(body.min.x - 2.0, y), Pos2::new(body.min.x, y)],
+                    thin,
+                );
+                painter.line_segment(
+                    [Pos2::new(body.max.x, y), Pos2::new(body.max.x + 2.0, y)],
+                    thin,
+                );
+            }
+        }
+        Icon::Memory => {
+            let body = Rect::from_center_size(center, Vec2::new(size * 0.72, size * 0.44));
+            painter.rect_stroke(
+                body,
+                CornerRadius::same(2),
+                Stroke::new(1.3_f32, color),
+                StrokeKind::Inside,
+            );
+            for k in [-0.18_f32, 0.0, 0.18] {
+                let x = center.x + size * k;
+                painter.line_segment(
+                    [
+                        Pos2::new(x, body.min.y + 2.0),
+                        Pos2::new(x, body.max.y - 2.0),
+                    ],
+                    thin,
+                );
+            }
+            for k in [-0.18_f32, 0.0, 0.18] {
+                let x = center.x + size * k;
+                painter.line_segment(
+                    [Pos2::new(x, body.max.y), Pos2::new(x, body.max.y + 2.5)],
+                    thin,
+                );
+            }
+        }
+        Icon::Load => {
+            let pts = [
+                (-0.78, 0.42),
+                (-0.38, -0.18),
+                (-0.06, 0.26),
+                (0.32, -0.56),
+                (0.76, 0.34),
+            ];
+            for pair in pts.windows(2) {
+                painter.line_segment(
+                    [
+                        Pos2::new(center.x + r * pair[0].0, center.y + r * pair[0].1),
+                        Pos2::new(center.x + r * pair[1].0, center.y + r * pair[1].1),
+                    ],
+                    thin,
+                );
+            }
+        }
+        Icon::Network => {
+            painter.line_segment(
+                [
+                    Pos2::new(center.x, center.y - r * 0.72),
+                    Pos2::new(center.x, center.y + r * 0.62),
+                ],
+                thin,
+            );
+            painter.line_segment(
+                [
+                    Pos2::new(center.x - r * 0.46, center.y + r * 0.12),
+                    Pos2::new(center.x, center.y + r * 0.62),
+                ],
+                thin,
+            );
+            painter.line_segment(
+                [
+                    Pos2::new(center.x + r * 0.46, center.y + r * 0.12),
+                    Pos2::new(center.x, center.y + r * 0.62),
+                ],
+                thin,
+            );
+        }
         Icon::WinMin => {
             painter.line_segment(
-                [Pos2::new(center.x - 5.0, center.y), Pos2::new(center.x + 5.0, center.y)],
+                [
+                    Pos2::new(center.x - 5.0, center.y),
+                    Pos2::new(center.x + 5.0, center.y),
+                ],
                 Stroke::new(1.2_f32, color),
             );
         }
@@ -265,8 +472,14 @@ pub fn draw_icon(painter: &Painter, center: Pos2, size: f32, icon: Icon, color: 
             );
         }
         Icon::WinRestore => {
-            let r_back = Rect::from_center_size(Pos2::new(center.x + 1.5, center.y - 1.5), Vec2::new(7.5, 7.5));
-            let r_front = Rect::from_center_size(Pos2::new(center.x - 1.5, center.y + 1.5), Vec2::new(7.5, 7.5));
+            let r_back = Rect::from_center_size(
+                Pos2::new(center.x + 1.5, center.y - 1.5),
+                Vec2::new(7.5, 7.5),
+            );
+            let r_front = Rect::from_center_size(
+                Pos2::new(center.x - 1.5, center.y + 1.5),
+                Vec2::new(7.5, 7.5),
+            );
             painter.rect_stroke(
                 r_back,
                 CornerRadius::same(1),
@@ -284,11 +497,17 @@ pub fn draw_icon(painter: &Painter, center: Pos2, size: f32, icon: Icon, color: 
             let d = 4.5;
             let s = Stroke::new(1.35_f32, color);
             painter.line_segment(
-                [Pos2::new(center.x - d, center.y - d), Pos2::new(center.x + d, center.y + d)],
+                [
+                    Pos2::new(center.x - d, center.y - d),
+                    Pos2::new(center.x + d, center.y + d),
+                ],
                 s,
             );
             painter.line_segment(
-                [Pos2::new(center.x + d, center.y - d), Pos2::new(center.x - d, center.y + d)],
+                [
+                    Pos2::new(center.x + d, center.y - d),
+                    Pos2::new(center.x - d, center.y + d),
+                ],
                 s,
             );
         }

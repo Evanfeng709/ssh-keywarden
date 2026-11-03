@@ -72,6 +72,7 @@ pub fn bootstrap_hosts(state: &AppState) {
             identity_file: Some(host.identity_file),
             identity_fingerprint: None,
             remote_path: None,
+            ..Default::default()
         });
     }
 }
@@ -575,7 +576,8 @@ async fn handle_terminal(
                 match value.get("t").and_then(|v| v.as_str()) {
                     Some("in") => {
                         if let Some(data) = value.get("d").and_then(|v| v.as_str()) {
-                            if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(data)
+                            if let Ok(bytes) =
+                                base64::engine::general_purpose::STANDARD.decode(data)
                             {
                                 let _ = write_half.data_bytes(bytes).await;
                             }

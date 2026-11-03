@@ -27,7 +27,9 @@ use kw_server::connect::{self, ConnectBody};
 use kw_server::error::ApiError;
 use kw_server::fsbrowse::safe_name;
 use kw_server::keys_ops;
+use kw_server::monitor;
 use kw_server::sessions::Session;
+use kw_server::sftp_ops;
 use kw_server::state::AppState;
 
 pub mod terminal;
@@ -154,6 +156,32 @@ impl MobileEngine {
 
     pub async fn connect(&self, body: ConnectBody) -> Result<Value, Value> {
         connect::open(&self.state, body).await.map_err(err_json)
+    }
+
+    /// 只做代理握手，不登录 SSH；目标端口取自主机配置（未保存就用手填的）。
+    pub async fn proxy_test(&self, body: connect::ProxyProbeBody) -> Result<Value, Value> {
+        connect::test_proxy(&self.state, body)
+            .await
+            .map_err(err_json)
+    }
+
+    /// 抓一份只读监控快照（仅 Linux）。
+    pub async fn monitor_snapshot(&self, sid: &str) -> Result<Value, Value> {
+        monitor::snapshot(&self.state, sid).await.map_err(err_json)
+    }
+
+    /// 代理密码只存本机 `data/proxy-auth.json`，不写 config.json、不进同步包。
+    /// 传空字符串 = 忘记该主机的代理密码。
+    pub fn set_proxy_password(&self, host_id: &str, password: &str) -> Result<Value, Value> {
+        self.state
+            .store
+            .set_proxy_password(host_id, password)
+            .map(|_| json!(true))
+            .map_err(|e| json!({ "error": e.to_string() }))
+    }
+
+    pub fn proxy_password_saved(&self, host_id: &str) -> bool {
+        self.state.store.proxy_password(host_id).is_some()
     }
 
     /// 新增或修改主机（手机上没有桌面那种导入入口，只能手填或同步包导入）。
@@ -326,6 +354,83 @@ impl MobileEngine {
     }
 
     /* ------------------------------------------------------------------ */
+    /* SFTP 文件与传输                                                      */
+    /* ------------------------------------------------------------------ */
+
+    pub async fn sftp_home(&self, sid: &str) -> Result<Value, Value> {
+        sftp_ops::home_dir(&self.state, sid).await.map_err(err_json)
+    }
+
+    pub async fn sftp_list(&self, sid: &str, path: &str) -> Result<Value, Value> {
+        sftp_ops::list_dir(&self.state, sid, path)
+            .await
+            .map_err(err_json)
+    }
+
+    pub async fn sftp_stat(&self, sid: &str, path: &str) -> Result<Value, Value> {
+        sftp_ops::stat(&self.state, sid, path)
+            .await
+            .map_err(err_json)
+    }
+
+    pub async fn sftp_mkdir(&self, sid: &str, path: &str) -> Result<Value, Value> {
+        sftp_ops::mkdir(&self.state, sid, path)
+            .await
+            .map_err(err_json)
+    }
+
+    pub async fn sftp_rename(&self, sid: &str, from: &str, to: &str) -> Result<Value, Value> {
+        sftp_ops::rename(&self.state, sid, from, to)
+            .await
+            .map_err(err_json)
+    }
+
+    pub async fn sftp_remove(&self, sid: &str, path: &str) -> Result<Value, Value> {
+        sftp_ops::remove(&self.state, sid, path)
+            .await
+            .map_err(err_json)
+    }
+
+    pub async fn sftp_chmod(&self, sid: &str, path: &str, mode: u32) -> Result<Value, Value> {
+        sftp_ops::chmod(&self.state, sid, path, mode)
+            .await
+            .map_err(err_json)
+    }
+
+    pub async fn sftp_download(
+        &self,
+        sid: &str,
+        remote: &str,
+        local: &str,
+    ) -> Result<Value, Value> {
+        sftp_ops::start_download(&self.state, sid, remote, local)
+            .await
+            .map_err(err_json)
+    }
+
+    pub async fn sftp_upload(&self, sid: &str, local: &str, remote: &str) -> Result<Value, Value> {
+        sftp_ops::start_upload(&self.state, sid, local, remote)
+            .await
+            .map_err(err_json)
+    }
+
+    pub async fn transfer_list(&self) -> Value {
+        sftp_ops::list_transfers(&self.state).await
+    }
+
+    pub async fn transfer_get(&self, id: &str) -> Result<Value, Value> {
+        sftp_ops::get_transfer(&self.state, id)
+            .await
+            .map_err(err_json)
+    }
+
+    pub async fn transfer_cancel(&self, id: &str) -> Result<Value, Value> {
+        sftp_ops::cancel_transfer(&self.state, id)
+            .await
+            .map_err(err_json)
+    }
+
+    /* ------------------------------------------------------------------ */
     /* 微软账号（OneDrive AppFolder）同步                                   */
     /* ------------------------------------------------------------------ */
 
@@ -433,6 +538,25 @@ impl MobileEngine {
                 Ok(patch) => async_call(self.save_host(patch)),
                 Err(e) => fail(format!("参数格式错误：{e}")),
             },
+            "proxyTest" => match serde_json::from_value::<connect::ProxyProbeBody>(args.clone()) {
+                Ok(body) => async_call(block_on(self.proxy_test(body))),
+                Err(e) => fail(format!("参数格式错误：{e}")),
+            },
+            "setProxyPassword" => match arg(args, "hostId") {
+                Some(id) => async_call(self.set_proxy_password(
+                    id,
+                    args.get("password").and_then(Value::as_str).unwrap_or(""),
+                )),
+                None => fail("缺少 hostId"),
+            },
+            "proxyPasswordSaved" => match arg(args, "hostId") {
+                Some(id) => ok(json!(self.proxy_password_saved(id))),
+                None => fail("缺少 hostId"),
+            },
+            "monitorSnapshot" => match arg(args, "sid") {
+                Some(sid) => async_call(block_on(self.monitor_snapshot(sid))),
+                None => fail("缺少 sid"),
+            },
             "deleteHost" => match arg(args, "id") {
                 Some(id) => async_call(self.delete_host(id)),
                 None => fail("缺少 id"),
@@ -492,6 +616,58 @@ impl MobileEngine {
                     args.get("enable").and_then(Value::as_bool).unwrap_or(false),
                 ))),
                 None => fail("缺少 sid"),
+            },
+            "sftpHome" => match arg(args, "sid") {
+                Some(sid) => async_call(block_on(self.sftp_home(sid))),
+                None => fail("缺少 sid"),
+            },
+            "sftpList" | "sftpStat" | "sftpMkdir" | "sftpRemove" => {
+                match (arg(args, "sid"), arg(args, "path")) {
+                    (Some(sid), Some(path)) => {
+                        let result = match method {
+                            "sftpList" => block_on(self.sftp_list(sid, path)),
+                            "sftpStat" => block_on(self.sftp_stat(sid, path)),
+                            "sftpMkdir" => block_on(self.sftp_mkdir(sid, path)),
+                            _ => block_on(self.sftp_remove(sid, path)),
+                        };
+                        async_call(result)
+                    }
+                    _ => fail("缺少 sid 或 path"),
+                }
+            }
+            "sftpRename" => match (arg(args, "sid"), arg(args, "from"), arg(args, "to")) {
+                (Some(sid), Some(from), Some(to)) => {
+                    async_call(block_on(self.sftp_rename(sid, from, to)))
+                }
+                _ => fail("缺少 sid / from / to"),
+            },
+            "sftpChmod" => match (arg(args, "sid"), arg(args, "path")) {
+                (Some(sid), Some(path)) => match args.get("mode").and_then(parse_mode) {
+                    Some(mode) => async_call(block_on(self.sftp_chmod(sid, path, mode))),
+                    None => fail("mode 必须是 0–7777 的八进制"),
+                },
+                _ => fail("缺少 sid 或 path"),
+            },
+            "sftpDownload" => match (arg(args, "sid"), arg(args, "remote"), arg(args, "local")) {
+                (Some(sid), Some(remote), Some(local)) => {
+                    async_call(block_on(self.sftp_download(sid, remote, local)))
+                }
+                _ => fail("缺少 sid / remote / local"),
+            },
+            "sftpUpload" => match (arg(args, "sid"), arg(args, "local"), arg(args, "remote")) {
+                (Some(sid), Some(local), Some(remote)) => {
+                    async_call(block_on(self.sftp_upload(sid, local, remote)))
+                }
+                _ => fail("缺少 sid / local / remote"),
+            },
+            "transferList" => ok(block_on(self.transfer_list())),
+            "transferGet" => match arg(args, "id") {
+                Some(id) => async_call(block_on(self.transfer_get(id))),
+                None => fail("缺少 id"),
+            },
+            "transferCancel" => match arg(args, "id") {
+                Some(id) => async_call(block_on(self.transfer_cancel(id))),
+                None => fail("缺少 id"),
             },
             "msStatus" => ok(self.ms_status()),
             "msSaveConfig" => {
@@ -662,6 +838,17 @@ fn num_field(args: &Value, key: &str) -> u32 {
     args.get(key).and_then(Value::as_u64).unwrap_or(0) as u32
 }
 
+/// 权限位：界面习惯传 "755"/"0644" 这类八进制字符串，数值则视为原始 mode。
+fn parse_mode(value: &Value) -> Option<u32> {
+    let mode = if let Some(text) = value.as_str() {
+        let text = text.trim().trim_start_matches("0o");
+        u32::from_str_radix(text, 8).ok()?
+    } else {
+        u32::try_from(value.as_u64()?).ok()?
+    };
+    (mode <= 0o7777).then_some(mode)
+}
+
 fn body_str<'a>(body: &'a Value, key: &str) -> Result<&'a str, Value> {
     arg(body, key).ok_or_else(|| json!({ "error": format!("缺少 {key}") }))
 }
@@ -783,6 +970,7 @@ mod tests {
                 identity_file: Some("/不存在的路径".into()),
                 identity_fingerprint: None,
                 remote_path: None,
+                ..Default::default()
             })
             .unwrap();
         a.state
@@ -845,6 +1033,7 @@ mod tests {
                 identity_file: None,
                 identity_fingerprint: None,
                 remote_path: None,
+                ..Default::default()
             })
             .unwrap();
 
@@ -891,6 +1080,7 @@ mod tests {
                 identity_file: Some(String::new()),
                 identity_fingerprint: None,
                 remote_path: None,
+                ..Default::default()
             })
             .unwrap();
         let id = host["id"].as_str().unwrap().to_string();
@@ -911,5 +1101,46 @@ mod tests {
 
         let boot = engine.call("bootstrap", &json!({}));
         assert_eq!(boot["ok"], json!(true));
+    }
+
+    #[test]
+    fn sftp_dispatch_validates_arguments_and_mode() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = MobileEngine::new(dir.path()).unwrap();
+
+        assert_eq!(
+            engine.call("sftpList", &json!({ "sid": "nope" }))["error"],
+            "缺少 sid 或 path"
+        );
+        assert_eq!(
+            engine.call(
+                "sftpChmod",
+                &json!({ "sid": "nope", "path": "/x", "mode": "10000" })
+            )["error"],
+            "mode 必须是 0–7777 的八进制"
+        );
+        assert_eq!(
+            engine.call(
+                "sftpChmod",
+                &json!({ "sid": "nope", "path": "/x", "mode": "0644" })
+            )["ok"],
+            false
+        );
+        assert_eq!(
+            engine.call("sftpDownload", &json!({ "sid": "nope", "remote": "/a" }))["error"],
+            "缺少 sid / remote / local"
+        );
+        assert_eq!(engine.call("transferGet", &json!({}))["error"], "缺少 id");
+        assert_eq!(engine.call("transferList", &json!({}))["ok"], true);
+        assert_eq!(
+            engine.call("transferGet", &json!({ "id": "t1" }))["error"],
+            "传输任务不存在或已过期"
+        );
+
+        assert_eq!(parse_mode(&json!("755")), Some(0o755));
+        assert_eq!(parse_mode(&json!("0o644")), Some(0o644));
+        assert_eq!(parse_mode(&json!(493)), Some(493));
+        assert_eq!(parse_mode(&json!("9")), None);
+        assert_eq!(parse_mode(&json!("10000")), None);
     }
 }

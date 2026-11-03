@@ -174,7 +174,9 @@ fn normalize_client_id(raw: &str) -> Result<String, String> {
             }
         });
     if !shaped {
-        return Err("客户端 ID 应该是 xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx 这样的 GUID".to_string());
+        return Err(
+            "客户端 ID 应该是 xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx 这样的 GUID".to_string(),
+        );
     }
     Ok(id)
 }
@@ -216,8 +218,14 @@ pub fn status(data_dir: &Path) -> MsSyncStatus {
         configured: !client_id.is_empty(),
         client_id,
         logged_in: auth.is_some(),
-        account_name: auth.as_ref().map(|a| a.account_name.clone()).unwrap_or_default(),
-        account_email: auth.as_ref().map(|a| a.account_email.clone()).unwrap_or_default(),
+        account_name: auth
+            .as_ref()
+            .map(|a| a.account_name.clone())
+            .unwrap_or_default(),
+        account_email: auth
+            .as_ref()
+            .map(|a| a.account_email.clone())
+            .unwrap_or_default(),
         last_sync_at: auth.as_ref().map(|a| a.last_sync_at).unwrap_or(0),
         has_sync_key: !cfg.sync_key.is_empty(),
     }
@@ -379,10 +387,7 @@ pub async fn complete_device_login(
             &client,
             &url,
             &[
-                (
-                    "grant_type",
-                    "urn:ietf:params:oauth:grant-type:device_code",
-                ),
+                ("grant_type", "urn:ietf:params:oauth:grant-type:device_code"),
                 ("client_id", client_id.as_str()),
                 ("device_code", device_code),
             ],
@@ -390,7 +395,10 @@ pub async fn complete_device_login(
         .await?;
 
         if let Some(token) = val.get("access_token").and_then(|v| v.as_str()) {
-            let refresh_token = val["refresh_token"].as_str().unwrap_or_default().to_string();
+            let refresh_token = val["refresh_token"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string();
             if refresh_token.is_empty() {
                 return Err("微软没有返回刷新令牌，请重新登录".to_string());
             }
@@ -550,32 +558,32 @@ pub async fn sync_now(
             .await
             .map_err(|e| format!("读取 OneDrive 同步文件失败：{e}"))?;
         match resp.status() {
-        StatusCode::OK => {
-            let text = resp
-                .text()
-                .await
-                .map_err(|e| format!("读取云端内容失败：{e}"))?;
-            if text.trim().is_empty() {
-                false
-            } else {
-                report = import_bundle(
-                    store,
-                    known_hosts,
-                    &keys_dir,
-                    &text,
-                    Some(pass),
-                    &ImportOptions {
-                        trust_changed: trust_changed.to_vec(),
-                        trust_all_changed: false,
-                    },
-                )?;
-                true
+            StatusCode::OK => {
+                let text = resp
+                    .text()
+                    .await
+                    .map_err(|e| format!("读取云端内容失败：{e}"))?;
+                if text.trim().is_empty() {
+                    false
+                } else {
+                    report = import_bundle(
+                        store,
+                        known_hosts,
+                        &keys_dir,
+                        &text,
+                        Some(pass),
+                        &ImportOptions {
+                            trust_changed: trust_changed.to_vec(),
+                            trust_all_changed: false,
+                        },
+                    )?;
+                    true
+                }
             }
-        }
-        StatusCode::NOT_FOUND => false,
-        StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => {
-            return Err("微软账号授权已失效，请重新登录".to_string());
-        }
+            StatusCode::NOT_FOUND => false,
+            StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => {
+                return Err("微软账号授权已失效，请重新登录".to_string());
+            }
             other => return Err(format!("OneDrive 读取失败（HTTP {}）", other.as_u16())),
         }
     };
@@ -640,8 +648,12 @@ mod tests {
     #[test]
     fn config_round_trip_and_logout_keeps_config() {
         let d = dir();
-        let st = save_config(d.path(), Some("0a1b2c3d-4e5f-6071-8293-a4b5c6d7e8f9"), Some("pw"))
-            .unwrap();
+        let st = save_config(
+            d.path(),
+            Some("0a1b2c3d-4e5f-6071-8293-a4b5c6d7e8f9"),
+            Some("pw"),
+        )
+        .unwrap();
         assert!(st.configured);
         assert!(st.has_sync_key);
         assert!(!st.logged_in);
@@ -690,7 +702,9 @@ mod tests {
             .enable_all()
             .build()
             .unwrap();
-        let err = rt.block_on(sync_now(&store, &kh, "  ", &[], false)).unwrap_err();
+        let err = rt
+            .block_on(sync_now(&store, &kh, "  ", &[], false))
+            .unwrap_err();
         assert!(err.contains("同步口令"), "{err}");
     }
 }

@@ -66,10 +66,7 @@ async fn run(args: &Args) -> Result<u8, String> {
             say(args.json, &format!("输入验证码：{}", prompt.user_code));
             say(
                 args.json,
-                &format!(
-                    "验证码 {} 秒内有效，等你在浏览器里确认…",
-                    prompt.expires_in
-                ),
+                &format!("验证码 {} 秒内有效，等你在浏览器里确认…", prompt.expires_in),
             );
             if !args.json {
                 open_browser(&prompt.verification_uri);
@@ -135,8 +132,14 @@ async fn run(args: &Args) -> Result<u8, String> {
 
             let store = Store::new(&data_dir);
             let known_hosts = KnownHosts::new(known_hosts_file(&data_dir));
-            let out =
-                ms_sync::sync_now(&store, &known_hosts, &passphrase, &args.trust_changed, args.force_upload).await?;
+            let out = ms_sync::sync_now(
+                &store,
+                &known_hosts,
+                &passphrase,
+                &args.trust_changed,
+                args.force_upload,
+            )
+            .await?;
             let conflicts = out.report.known_host_conflicts.len();
 
             if args.json {
@@ -212,8 +215,7 @@ impl Args {
                 "--client-id" => {
                     i += 1;
                     args.client_id = Some(
-                        argv
-                            .get(i)
+                        argv.get(i)
                             .ok_or("--client-id 缺少 Azure 应用 ID")?
                             .to_string(),
                     );

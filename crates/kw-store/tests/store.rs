@@ -184,3 +184,116 @@ fn config_defaults_when_missing_or_corrupt() {
         .collect();
     assert!(!backups.is_empty());
 }
+
+#[test]
+fn host_proxy_settings_roundtrip_and_preserve() {
+    let (_dir, store) = store();
+    let host = store
+        .upsert_host(HostPatch {
+            host: Some("example.test".into()),
+            username: Some("alice".into()),
+            proxy_kind: Some("SOCKS5".into()),
+            proxy_host: Some(" 127.0.0.1 ".into()),
+            proxy_port: Some(1080),
+            proxy_username: Some(" relay ".into()),
+            ..Default::default()
+        })
+        .unwrap();
+    assert_eq!(host.proxy_kind, "socks5", "类型应规范成小写");
+    assert_eq!(host.proxy_host, "127.0.0.1");
+    assert_eq!(host.proxy_username, "relay");
+    assert!(host.proxy_enabled());
+
+    // 不感知代理的写入路径传 None：代理配置必须保留
+    let updated = store
+        .upsert_host(HostPatch {
+            id: Some(host.id.clone()),
+            host: Some("example.test".into()),
+            username: Some("alice".into()),
+            name: Some("改名".into()),
+            ..Default::default()
+        })
+        .unwrap();
+    assert_eq!(updated.proxy_kind, "socks5");
+    assert_eq!(updated.proxy_host, "127.0.0.1");
+    assert_eq!(updated.proxy_port, 1080);
+    assert_eq!(updated.proxy_username, "relay");
+
+    // 显式关闭：清掉地址、端口与用户名
+    let cleared = store
+        .upsert_host(HostPatch {
+            id: Some(host.id.clone()),
+            host: Some("example.test".into()),
+            username: Some("alice".into()),
+            proxy_kind: Some(String::new()),
+            ..Default::default()
+        })
+        .unwrap();
+    assert!(!cleared.proxy_enabled());
+    assert!(cleared.proxy_host.is_empty());
+    assert_eq!(cleared.proxy_port, 1080);
+    assert!(cleared.proxy_username.is_empty());
+
+    // 端口传 0 时回落到 1080
+    let zero = store
+        .upsert_host(HostPatch {
+            id: Some(host.id),
+            host: Some("example.test".into()),
+            username: Some("alice".into()),
+            proxy_kind: Some("http".into()),
+            proxy_host: Some("proxy.test".into()),
+            proxy_port: Some(0),
+            ..Default::default()
+        })
+        .unwrap();
+    assert_eq!(zero.proxy_port, 1080);
+}
+
+#[test]
+fn proxy_password_stays_out_of_config() {
+    let (dir, store) = store();
+    let host = store
+        .upsert_host(HostPatch {
+            host: Some("example.test".into()),
+            username: Some("alice".into()),
+            proxy_kind: Some("socks5".into()),
+            proxy_host: Some("127.0.0.1".into()),
+            ..Default::default()
+        })
+        .unwrap();
+
+    assert_eq!(store.proxy_password(&host.id), None);
+    store.set_proxy_password(&host.id, "s3cret").unwrap();
+    assert_eq!(store.proxy_password(&host.id).as_deref(), Some("s3cret"));
+
+    let config = std::fs::read_to_string(store.config_path()).unwrap();
+    assert!(!config.contains("s3cret"), "代理密码不能进 config.json");
+    let auth = std::fs::read_to_string(store.proxy_auth_path()).unwrap();
+    assert!(auth.contains("s3cret"));
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(store.proxy_auth_path())
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600, "proxy-auth.json 必须是 0600");
+    }
+
+    store.set_proxy_password(&host.id, "").unwrap();
+    assert_eq!(store.proxy_password(&host.id), None, "空密码 = 忘记");
+
+    std::fs::write(store.proxy_auth_path(), "{ broken").unwrap();
+    assert_eq!(store.proxy_password(&host.id), None, "坏文件按空处理");
+
+    store.set_proxy_password(&host.id, "again").unwrap();
+    store.remove_host(&host.id).unwrap();
+    assert_eq!(
+        store.proxy_password(&host.id),
+        None,
+        "删除主机应同时忘掉代理密码"
+    );
+    let _ = dir;
+}

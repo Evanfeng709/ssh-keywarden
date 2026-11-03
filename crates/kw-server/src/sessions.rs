@@ -12,7 +12,9 @@ use serde_json::{json, Value};
 use tokio::sync::{Mutex, RwLock};
 
 use kw_keys::{fingerprint_of_blob, load_private_key, parse_authorized_keys};
-use kw_ssh::session::{ServerProbe, SshClient};
+use kw_ssh::proxy::ProxyConfig;
+use kw_ssh::session::{ServerProbe, SshClient, SshError};
+use kw_ssh::sftp::SftpHandle;
 
 pub fn now_ms() -> u64 {
     SystemTime::now()
@@ -44,6 +46,8 @@ pub struct Session {
     pub sid: String,
     pub client: SshClient,
     pub target: RwLock<Target>,
+    /// 建连时用的代理；换钥后要重新验证登录，必须沿用同一条隧道配置。
+    pub proxy: Option<ProxyConfig>,
     pub remote: RwLock<RemoteState>,
     pub server: ServerProbe,
     pub auth_method: &'static str,
@@ -53,6 +57,8 @@ pub struct Session {
     last_used: AtomicU64,
     /// 同一会话的写操作排队：add/replace/delete/restore 都是读-改-写多步流程
     pub write_lock: Mutex<()>,
+    /// SFTP 子系统按需打开；文件浏览/传输共用这一条通道
+    sftp: Mutex<Option<Arc<SftpHandle>>>,
 }
 
 impl Session {
@@ -60,6 +66,7 @@ impl Session {
         sid: String,
         client: SshClient,
         target: Target,
+        proxy: Option<ProxyConfig>,
         remote: RemoteState,
         server: ServerProbe,
         auth_method: &'static str,
@@ -70,6 +77,7 @@ impl Session {
             sid,
             client,
             target: RwLock::new(target),
+            proxy,
             remote: RwLock::new(remote),
             server,
             auth_method,
@@ -77,7 +85,19 @@ impl Session {
             created_at: now,
             last_used: AtomicU64::new(now),
             write_lock: Mutex::new(()),
+            sftp: Mutex::new(None),
         }
+    }
+
+    /// 首次调用时打开 SFTP 子系统，之后复用同一句柄。
+    pub async fn sftp(&self) -> Result<Arc<SftpHandle>, SshError> {
+        let mut slot = self.sftp.lock().await;
+        if let Some(handle) = slot.as_ref() {
+            return Ok(Arc::clone(handle));
+        }
+        let handle = Arc::new(SftpHandle::open(&self.client).await?);
+        *slot = Some(Arc::clone(&handle));
+        Ok(handle)
     }
 
     pub fn touch(&self) {

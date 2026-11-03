@@ -137,7 +137,11 @@ async fn complete_without_pending_login_is_rejected() {
     let dir = tempfile::tempdir().unwrap();
     let app = app(dir.path());
     let res = app
-        .oneshot(authed("POST", "/api/sync/login/complete", Some(serde_json::json!({}))))
+        .oneshot(authed(
+            "POST",
+            "/api/sync/login/complete",
+            Some(serde_json::json!({})),
+        ))
         .await
         .unwrap();
     assert_eq!(res.status(), StatusCode::BAD_REQUEST);
@@ -183,7 +187,11 @@ async fn logout_keeps_config_but_clears_login() {
     let dir = tempfile::tempdir().unwrap();
     let app = app(dir.path());
     let res = app
-        .oneshot(authed("POST", "/api/sync/logout", Some(serde_json::json!({}))))
+        .oneshot(authed(
+            "POST",
+            "/api/sync/logout",
+            Some(serde_json::json!({})),
+        ))
         .await
         .unwrap();
     assert_eq!(res.status(), StatusCode::OK);

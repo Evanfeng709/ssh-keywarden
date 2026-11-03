@@ -7,8 +7,8 @@ mod icons;
 mod theme;
 mod vt;
 
-use std::sync::Arc;
 use eframe::egui;
+use std::sync::Arc;
 
 fn load_app_icon() -> Option<Arc<egui::IconData>> {
     let bytes = include_bytes!("../icons/icon.png");

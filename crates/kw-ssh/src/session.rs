@@ -33,6 +33,8 @@ pub struct SshConfig {
     pub private_key: Option<Secret>,
     pub passphrase: Option<Secret>,
     pub password: Option<Secret>,
+    /// 配了代理就先过代理隧道，再在隧道里跑 SSH。
+    pub proxy: Option<crate::proxy::ProxyConfig>,
     /// 用户在指纹弹窗里确认过的指纹；给了才会放行未知/已变化的主机密钥。
     pub trust_fingerprint: Option<String>,
 }
@@ -54,6 +56,10 @@ pub enum SshError {
     HostKey(#[from] HostKeyError),
     #[error(transparent)]
     Russh(#[from] russh::Error),
+    #[error("SFTP 操作失败：{0}")]
+    Sftp(#[from] russh_sftp::client::error::Error),
+    #[error(transparent)]
+    Proxy(#[from] crate::proxy::ProxyError),
     #[error("{0}")]
     Msg(String),
 }
@@ -152,7 +158,7 @@ pub struct SshClient {
 
 impl SshClient {
     /// 打开一条 session 通道。只在这一步占着 handle 的锁，之后互不影响。
-    async fn open_channel(&self) -> Result<Channel<Msg>, SshError> {
+    pub(crate) async fn open_channel(&self) -> Result<Channel<Msg>, SshError> {
         let handle = self.handle.lock().await;
         if handle.is_closed() {
             return Err(SshError::msg("SSH 连接已断开，请重新连接"));
@@ -503,22 +509,37 @@ pub async fn connect(cfg: &SshConfig, known_hosts: Arc<KnownHosts>) -> Result<Ss
     };
 
     let addr = (cfg.host.as_str(), cfg.port);
-    let mut handle = match tokio::time::timeout(
-        CONNECT_TIMEOUT + Duration::from_secs(2),
-        client::connect(config, addr, handler),
-    )
-    .await
-    {
-        Ok(Ok(handle)) => handle,
-        Ok(Err(err)) => return Err(translate_connect_error(err, cfg)),
-        Err(_) => {
-            return Err(SshError::msg(format!(
-                "连接超时（{}s）：{}:{} 无响应",
-                CONNECT_TIMEOUT.as_secs(),
-                cfg.host,
-                cfg.port
-            )))
+    let budget = CONNECT_TIMEOUT + Duration::from_secs(2);
+    let mut handle = match &cfg.proxy {
+        Some(proxy) => {
+            let stream = crate::proxy::connect_through(proxy, &cfg.host, cfg.port).await?;
+            match tokio::time::timeout(budget, client::connect_stream(config, stream, handler))
+                .await
+            {
+                Ok(Ok(handle)) => handle,
+                Ok(Err(err)) => return Err(translate_connect_error(err, cfg)),
+                Err(_) => {
+                    return Err(SshError::msg(format!(
+                        "通过代理连接 SSH 超时（{}s）：{}:{} 无响应",
+                        CONNECT_TIMEOUT.as_secs(),
+                        cfg.host,
+                        cfg.port
+                    )))
+                }
+            }
         }
+        None => match tokio::time::timeout(budget, client::connect(config, addr, handler)).await {
+            Ok(Ok(handle)) => handle,
+            Ok(Err(err)) => return Err(translate_connect_error(err, cfg)),
+            Err(_) => {
+                return Err(SshError::msg(format!(
+                    "连接超时（{}s）：{}:{} 无响应",
+                    CONNECT_TIMEOUT.as_secs(),
+                    cfg.host,
+                    cfg.port
+                )))
+            }
+        },
     };
 
     let auth_method = authenticate(&mut handle, cfg).await?;
@@ -549,7 +570,7 @@ fn build_config() -> Config {
 
 fn translate_connect_error(err: SshError, cfg: &SshConfig) -> SshError {
     match err {
-        SshError::HostKey(_) | SshError::Msg(_) => err,
+        SshError::HostKey(_) | SshError::Msg(_) | SshError::Sftp(_) | SshError::Proxy(_) => err,
         SshError::Russh(e) => {
             let msg = e.to_string();
             let friendly = match &e {

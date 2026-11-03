@@ -38,6 +38,18 @@ fn default_port() -> u16 {
     22
 }
 
+fn default_proxy_port() -> u16 {
+    1080
+}
+
+fn normalize_proxy_kind(kind: &str) -> String {
+    match kind.trim().to_ascii_lowercase().as_str() {
+        "http" => "http".to_string(),
+        "socks5" => "socks5".to_string(),
+        _ => String::new(),
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", default)]
 pub struct Settings {
@@ -73,6 +85,13 @@ pub struct Host {
     #[serde(default)]
     pub identity_fingerprint: String,
     pub remote_path: String,
+    /// 连接代理：`""` / `"http"` / `"socks5"`。代理密码不进这里，
+    /// 它单独存在本机 `proxy-auth.json`，不随配置同步。
+    pub proxy_kind: String,
+    pub proxy_host: String,
+    #[serde(default = "default_proxy_port")]
+    pub proxy_port: u16,
+    pub proxy_username: String,
     pub created_at: u64,
     pub updated_at: u64,
     /// 删除墓碑：非 0 表示已删除，仍保留在 config.json 里供跨设备同步。
@@ -91,9 +110,27 @@ impl Default for Host {
             identity_file: String::new(),
             identity_fingerprint: String::new(),
             remote_path: String::new(),
+            proxy_kind: String::new(),
+            proxy_host: String::new(),
+            proxy_port: default_proxy_port(),
+            proxy_username: String::new(),
             created_at: 0,
             updated_at: 0,
             deleted_at: 0,
+        }
+    }
+}
+
+impl Host {
+    pub fn proxy_enabled(&self) -> bool {
+        matches!(self.proxy_kind.as_str(), "http" | "socks5") && !self.proxy_host.trim().is_empty()
+    }
+
+    pub fn proxy_port_or_default(&self) -> u16 {
+        if self.proxy_port == 0 {
+            default_proxy_port()
+        } else {
+            self.proxy_port
         }
     }
 }
@@ -126,6 +163,11 @@ pub struct HostPatch {
     /// 不传 = 保留原值（前端表单不感知这个字段，别让一次编辑把它清掉）
     pub identity_fingerprint: Option<String>,
     pub remote_path: Option<String>,
+    /// 传 `None` = 保留原值（同步/换钥等不感知代理的写入路径）。
+    pub proxy_kind: Option<String>,
+    pub proxy_host: Option<String>,
+    pub proxy_port: Option<u16>,
+    pub proxy_username: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -186,6 +228,40 @@ impl Store {
 
     pub fn notes_path(&self) -> PathBuf {
         self.dir.join("key-notes.json")
+    }
+
+    /// 代理密码只留在本机：不同步、不导出、不进 `config.json`。
+    pub fn proxy_auth_path(&self) -> PathBuf {
+        self.dir.join("proxy-auth.json")
+    }
+
+    pub fn proxy_password(&self, host_id: &str) -> Option<String> {
+        self.read_proxy_auth()
+            .remove(host_id)
+            .filter(|s| !s.is_empty())
+    }
+
+    /// 密码传空串 = 忘记这台主机的代理密码。
+    pub fn set_proxy_password(&self, host_id: &str, password: &str) -> Result<(), StoreError> {
+        if host_id.trim().is_empty() {
+            return Ok(());
+        }
+        let path = self.proxy_auth_path();
+        let mut map = self.read_proxy_auth();
+        if password.is_empty() {
+            map.remove(host_id);
+        } else {
+            map.insert(host_id.to_string(), password.to_string());
+        }
+        self.write_json_atomic(&path, &map)
+            .map_err(|e| StoreError::Io(path.display().to_string(), e.to_string()))
+    }
+
+    fn read_proxy_auth(&self) -> BTreeMap<String, String> {
+        match fs::read_to_string(self.proxy_auth_path()) {
+            Ok(text) => serde_json::from_str(&text).unwrap_or_default(),
+            Err(_) => BTreeMap::new(),
+        }
     }
 
     fn ensure_dir(&self) -> io::Result<()> {
@@ -296,10 +372,32 @@ impl Store {
                 .unwrap_or_default()
                 .trim()
                 .to_string(),
+            proxy_kind: normalize_proxy_kind(patch.proxy_kind.as_deref().unwrap_or_default()),
+            proxy_host: patch
+                .proxy_host
+                .clone()
+                .unwrap_or_default()
+                .trim()
+                .to_string(),
+            proxy_port: patch
+                .proxy_port
+                .filter(|p| *p > 0)
+                .unwrap_or_else(default_proxy_port),
+            proxy_username: patch
+                .proxy_username
+                .clone()
+                .unwrap_or_default()
+                .trim()
+                .to_string(),
             created_at: 0,
             updated_at: now_ms(),
             deleted_at: 0,
         };
+        if host.proxy_kind.is_empty() {
+            host.proxy_host.clear();
+            host.proxy_port = default_proxy_port();
+            host.proxy_username.clear();
+        }
         if host.host.is_empty() {
             return Err(StoreError::EmptyHost);
         }
@@ -318,6 +416,14 @@ impl Store {
                 // 否则用户在桌面改一次主机名就会把跨设备的私钥关联抹掉
                 if host.identity_fingerprint.is_empty() {
                     host.identity_fingerprint = cfg.hosts[idx].identity_fingerprint.clone();
+                }
+                // 代理字段同理：不感知代理的写入路径（同步、换钥、SSH config 导入）
+                // 传 None，不能把用户已经配好的代理顺手清掉。
+                if patch.proxy_kind.is_none() {
+                    host.proxy_kind = cfg.hosts[idx].proxy_kind.clone();
+                    host.proxy_host = cfg.hosts[idx].proxy_host.clone();
+                    host.proxy_port = cfg.hosts[idx].proxy_port;
+                    host.proxy_username = cfg.hosts[idx].proxy_username.clone();
                 }
                 cfg.hosts[idx] = host.clone();
             }
@@ -364,7 +470,12 @@ impl Store {
         let now = now_ms();
         host.deleted_at = now;
         host.updated_at = now;
-        self.write(&cfg)
+        self.write(&cfg)?;
+        // 代理密码是纯本机凭据，主机删了就一起忘掉
+        if self.proxy_auth_path().exists() {
+            let _ = self.set_proxy_password(id, "");
+        }
+        Ok(())
     }
 
     /// 按 id（缺失则按 host/port/user）合并一条远端主机记录。

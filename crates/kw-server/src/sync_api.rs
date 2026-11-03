@@ -114,13 +114,7 @@ async fn api_login_complete(
         .clamp(MIN_TIMEOUT_SECS, MAX_TIMEOUT_SECS);
     let dir = state.store.dir().to_path_buf();
 
-    match ms_sync::complete_device_login(
-        &dir,
-        &device_code,
-        None,
-        Duration::from_secs(secs),
-    )
-    .await
+    match ms_sync::complete_device_login(&dir, &device_code, None, Duration::from_secs(secs)).await
     {
         Ok(_) => Ok(ok(status_value(&state).await)),
         Err(e) => {

@@ -529,6 +529,7 @@ mod tests {
                 identity_file: None,
                 identity_fingerprint: None,
                 remote_path: None,
+                ..Default::default()
             })
             .unwrap()
     }
@@ -542,18 +543,42 @@ mod tests {
 
         let host = sample_host(&a, "prod");
         let first = export_bundle(&a, &akh, &a.dir().join("keys"), false, None).unwrap();
-        let report = import_bundle(&b, &bkh, &b.dir().join("keys"), &first, None, &ImportOptions::default()).unwrap();
+        let report = import_bundle(
+            &b,
+            &bkh,
+            &b.dir().join("keys"),
+            &first,
+            None,
+            &ImportOptions::default(),
+        )
+        .unwrap();
         assert_eq!(report.added_hosts, 1);
         assert_eq!(b.list_hosts().len(), 1);
 
         a.remove_host(&host.id).unwrap();
         let second = export_bundle(&a, &akh, &a.dir().join("keys"), false, None).unwrap();
-        let report = import_bundle(&b, &bkh, &b.dir().join("keys"), &second, None, &ImportOptions::default()).unwrap();
+        let report = import_bundle(
+            &b,
+            &bkh,
+            &b.dir().join("keys"),
+            &second,
+            None,
+            &ImportOptions::default(),
+        )
+        .unwrap();
         assert_eq!(report.deleted_hosts, 1);
         assert!(b.list_hosts().is_empty(), "删除必须跟着墓碑同步过去");
 
         // 旧的（删除前）包不能把主机复活
-        let report = import_bundle(&b, &bkh, &b.dir().join("keys"), &first, None, &ImportOptions::default()).unwrap();
+        let report = import_bundle(
+            &b,
+            &bkh,
+            &b.dir().join("keys"),
+            &first,
+            None,
+            &ImportOptions::default(),
+        )
+        .unwrap();
         assert_eq!(report.added_hosts, 0);
         assert!(b.list_hosts().is_empty());
     }
@@ -568,19 +593,43 @@ mod tests {
 
         a.set_key_note(fp, "台式机").unwrap();
         let bundle = export_bundle(&a, &akh, &a.dir().join("keys"), false, None).unwrap();
-        import_bundle(&b, &bkh, &b.dir().join("keys"), &bundle, None, &ImportOptions::default()).unwrap();
+        import_bundle(
+            &b,
+            &bkh,
+            &b.dir().join("keys"),
+            &bundle,
+            None,
+            &ImportOptions::default(),
+        )
+        .unwrap();
         assert_eq!(b.list_key_notes()[fp].note, "台式机");
 
         a.set_key_note(fp, "").unwrap();
         let bundle = export_bundle(&a, &akh, &a.dir().join("keys"), false, None).unwrap();
-        import_bundle(&b, &bkh, &b.dir().join("keys"), &bundle, None, &ImportOptions::default()).unwrap();
+        import_bundle(
+            &b,
+            &bkh,
+            &b.dir().join("keys"),
+            &bundle,
+            None,
+            &ImportOptions::default(),
+        )
+        .unwrap();
         assert!(!b.list_key_notes().contains_key(fp), "删除备注要同步");
 
         // 设备 B 又写了一条更新的备注，A 的旧删除不应覆盖它
         std::thread::sleep(std::time::Duration::from_millis(2));
         b.set_key_note(fp, "B 设备新备注").unwrap();
         let older = export_bundle(&a, &akh, &a.dir().join("keys"), false, None).unwrap();
-        import_bundle(&b, &bkh, &b.dir().join("keys"), &older, None, &ImportOptions::default()).unwrap();
+        import_bundle(
+            &b,
+            &bkh,
+            &b.dir().join("keys"),
+            &older,
+            None,
+            &ImportOptions::default(),
+        )
+        .unwrap();
         assert_eq!(b.list_key_notes()[fp].note, "B 设备新备注");
     }
 
@@ -595,7 +644,15 @@ mod tests {
         bkh.save("example.test", 22, b"local-key");
         let bundle = export_bundle(&a, &akh, &a.dir().join("keys"), false, None).unwrap();
 
-        let report = import_bundle(&b, &bkh, &b.dir().join("keys"), &bundle, None, &ImportOptions::default()).unwrap();
+        let report = import_bundle(
+            &b,
+            &bkh,
+            &b.dir().join("keys"),
+            &bundle,
+            None,
+            &ImportOptions::default(),
+        )
+        .unwrap();
         assert_eq!(report.known_host_conflicts.len(), 1);
         assert_eq!(
             bkh.get("example.test", 22).unwrap().fingerprint,
@@ -675,6 +732,7 @@ mod tests {
             identity_file: Some(key_path.display().to_string()),
             identity_fingerprint: Some(gen.fingerprint.clone()),
             remote_path: Some(host.remote_path.clone()),
+            ..Default::default()
         })
         .unwrap();
 
@@ -737,6 +795,7 @@ mod tests {
             identity_file: Some(key_path.display().to_string()),
             identity_fingerprint: None,
             remote_path: Some(host.remote_path.clone()),
+            ..Default::default()
         })
         .unwrap();
 

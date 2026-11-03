@@ -103,6 +103,8 @@ pub fn read_ui(data_dir: &Path) -> Value {
     let value: Value = serde_json::from_str(&raw).unwrap_or(Value::Null);
     let mode = match value.get("mode").and_then(|v| v.as_str()) {
         Some("term") => "term",
+        Some("files") => "files",
+        Some("monitor") => "monitor",
         _ => "keys",
     };
     let term_height = value
@@ -115,7 +117,12 @@ pub fn read_ui(data_dir: &Path) -> Value {
 }
 
 pub fn save_ui_mode(data_dir: &Path, mode: &str, term_height: i64) {
-    let m = if mode == "term" { "term" } else { "keys" };
+    let m = match mode {
+        "term" => "term",
+        "files" => "files",
+        "monitor" => "monitor",
+        _ => "keys",
+    };
     let h = if (180..=10_000).contains(&term_height) {
         term_height
     } else {
@@ -299,6 +306,18 @@ mod tests {
         assert_eq!(
             read_ui(dir.path()),
             json!({ "mode": "term", "termHeight": 420 })
+        );
+
+        save_ui_mode(dir.path(), "files", 300);
+        assert_eq!(
+            read_ui(dir.path()),
+            json!({ "mode": "files", "termHeight": 300 })
+        );
+
+        save_ui_mode(dir.path(), "monitor", 0);
+        assert_eq!(
+            read_ui(dir.path()),
+            json!({ "mode": "monitor", "termHeight": 0 })
         );
 
         write_json_atomic(

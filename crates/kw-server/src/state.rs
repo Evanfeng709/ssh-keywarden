@@ -13,6 +13,7 @@ use kw_store::sshconfig::import_from_ssh_config;
 use kw_store::{Settings, Store};
 
 use crate::sessions::Sessions;
+use crate::sftp_ops::Transfers;
 
 pub struct AppState {
     /// 每次启动随机，等价旧版 `crypto.randomBytes(18).toString('hex')`
@@ -31,6 +32,8 @@ pub struct AppState {
     pub keys_dir: PathBuf,
     /// 设备码登录的中间态：只有 device_code，不落盘、不进日志，重启即失效。
     pub pending_login: Mutex<Option<String>>,
+    /// 正在跑/刚跑完的 SFTP 传输任务
+    pub transfers: Transfers,
     scan_cache: Mutex<HashMap<String, (Instant, ScanResult)>>,
 }
 
@@ -61,6 +64,7 @@ impl AppState {
             scan_cache_ms,
             keys_dir,
             pending_login: Mutex::new(None),
+            transfers: Transfers::default(),
             scan_cache: Mutex::new(HashMap::new()),
         }
     }
