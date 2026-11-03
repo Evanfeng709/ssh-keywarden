@@ -1944,7 +1944,6 @@ impl eframe::App for KwDesktopApp {
             self.poll_latency();
         }
 
-        self.render_tabbar(ctx);
         self.render_conn_bar(ctx);
 
         egui::CentralPanel::default()
@@ -1966,12 +1965,17 @@ impl eframe::App for KwDesktopApp {
 
 impl KwDesktopApp {
     /// 顶部多会话标签栏。没有任何会话时整条不出现。
-    fn render_tabbar(&mut self, ctx: &egui::Context) {
+    /// 顶栏里的会话标签（原独立标签栏并入顶栏，省掉一条 34px）。
+    fn draw_tabs(&mut self, ui: &mut egui::Ui) {
+        let p = self.palette;
         if self.tabs.is_empty() {
+            if Self::tiny_btn(ui, "＋", p.faint) {
+                self.switch_mode(ViewMode::Keys);
+            }
             return;
         }
-        let p = self.palette;
-        // 先快照：闭包里不能再借 self，否则和后面的 stash/activate 打架
+        // 只有在终端视图里，活动标签才算"真活动" —— 否则在主机页看它亮着会误导
+        let in_term = self.mode == ViewMode::Term;
         let snap: Vec<(String, bool, bool)> = self
             .tabs
             .iter()
@@ -1981,99 +1985,87 @@ impl KwDesktopApp {
         let mut switch_to: Option<usize> = None;
         let mut close_at: Option<usize> = None;
         let mut new_tab = false;
-        let font = FontId::proportional(12.0);
+        let font = FontId::proportional(11.5);
 
-        egui::TopBottomPanel::top("kw_tabbar")
-            .exact_height(34.0)
-            .frame(
-                Frame::NONE
-                    .fill(p.bg_elev)
-                    .stroke(Stroke::new(1.0_f32, p.border))
-                    .inner_margin(Margin::symmetric(10, 5)),
-            )
-            .show(ctx, |ui| {
-                ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = 6.0;
-                    for (i, (title, active, connected)) in snap.iter().enumerate() {
-                        let text_w = ui
-                            .painter()
-                            .layout_no_wrap(title.clone(), font.clone(), p.text)
-                            .size()
-                            .x;
-                        let (rect, resp) =
-                            ui.allocate_exact_size(Vec2::new(text_w + 38.0, 24.0), Sense::click());
+        for (i, (title, active, connected)) in snap.iter().enumerate() {
+            let active = *active && in_term;
+            let text_w = ui
+                .painter()
+                .layout_no_wrap(title.clone(), font.clone(), p.text)
+                .size()
+                .x;
+            let (rect, resp) =
+                ui.allocate_exact_size(Vec2::new(text_w + 34.0, 22.0), Sense::click());
 
-                        if *active {
-                            // 活动标签：稍亮底 + 底部 2px 强调线（Netcatty 的质感就来自这条线）
-                            ui.painter()
-                                .rect_filled(rect, CornerRadius::same(6), p.surface3);
-                            let line = Rect::from_min_max(
-                                Pos2::new(rect.left() + 7.0, rect.bottom() - 2.0),
-                                Pos2::new(rect.right() - 7.0, rect.bottom()),
-                            );
-                            ui.painter()
-                                .rect_filled(line, CornerRadius::same(1), p.accent);
-                        } else if resp.hovered() {
-                            ui.painter().rect_filled(
-                                rect,
-                                CornerRadius::same(6),
-                                p.surface3.linear_multiply(0.55),
-                            );
-                        }
+            if active {
+                ui.painter()
+                    .rect_filled(rect, CornerRadius::same(5), p.surface3);
+                let line = Rect::from_min_max(
+                    Pos2::new(rect.left() + 6.0, rect.bottom() - 2.0),
+                    Pos2::new(rect.right() - 6.0, rect.bottom()),
+                );
+                ui.painter()
+                    .rect_filled(line, CornerRadius::same(1), p.accent);
+            } else if resp.hovered() {
+                ui.painter().rect_filled(
+                    rect,
+                    CornerRadius::same(5),
+                    p.surface3.linear_multiply(0.55),
+                );
+            }
 
-                        // 左侧圆点：绿=终端在线，灰=还没连上
-                        ui.painter().circle_filled(
-                            rect.left_center() + Vec2::new(9.0, 0.0),
-                            2.5,
-                            if *connected { p.ok } else { p.faint },
-                        );
-                        ui.painter().text(
-                            rect.left_center() + Vec2::new(18.0, 0.0),
-                            Align2::LEFT_CENTER,
-                            title,
-                            font.clone(),
-                            if *active { p.text } else { p.dim },
-                        );
+            ui.painter().circle_filled(
+                rect.left_center() + Vec2::new(8.0, 0.0),
+                2.5,
+                if *connected { p.ok } else { p.faint },
+            );
+            ui.painter().text(
+                rect.left_center() + Vec2::new(16.0, 0.0),
+                Align2::LEFT_CENTER,
+                title,
+                font.clone(),
+                if active { p.text } else { p.dim },
+            );
 
-                        // 右侧关闭 ×
-                        let x_rect = Rect::from_center_size(
-                            Pos2::new(rect.right() - 11.0, rect.center().y),
-                            Vec2::splat(14.0),
-                        );
-                        let x_resp =
-                            ui.interact(x_rect, Id::new(("kw_tab_close", i)), Sense::click());
-                        let xc = if x_resp.hovered() { p.danger } else { p.faint };
-                        let c = x_rect.center();
-                        let r = 3.2;
-                        ui.painter().line_segment(
-                            [Pos2::new(c.x - r, c.y - r), Pos2::new(c.x + r, c.y + r)],
-                            Stroke::new(1.2_f32, xc),
-                        );
-                        ui.painter().line_segment(
-                            [Pos2::new(c.x + r, c.y - r), Pos2::new(c.x - r, c.y + r)],
-                            Stroke::new(1.2_f32, xc),
-                        );
+            let x_rect = Rect::from_center_size(
+                Pos2::new(rect.right() - 10.0, rect.center().y),
+                Vec2::splat(12.0),
+            );
+            let x_resp = ui.interact(x_rect, Id::new(("kw_tab_close", i)), Sense::click());
+            let xc = if x_resp.hovered() { p.danger } else { p.faint };
+            let c = x_rect.center();
+            let r = 3.0;
+            ui.painter().line_segment(
+                [Pos2::new(c.x - r, c.y - r), Pos2::new(c.x + r, c.y + r)],
+                Stroke::new(1.1_f32, xc),
+            );
+            ui.painter().line_segment(
+                [Pos2::new(c.x + r, c.y - r), Pos2::new(c.x - r, c.y + r)],
+                Stroke::new(1.1_f32, xc),
+            );
 
-                        if resp.clicked() {
-                            switch_to = Some(i);
-                        }
-                        if x_resp.clicked() {
-                            close_at = Some(i);
-                        }
-                    }
+            if resp.clicked() {
+                switch_to = Some(i);
+            }
+            if x_resp.clicked() {
+                close_at = Some(i);
+            }
+            if !active {
+                resp.on_hover_text(format!("切到 {title}"));
+            }
+        }
 
-                    // ＋ 新建：回主机页挑一台（选中后点「打开终端」就会新建标签）
-                    if Self::tiny_btn(ui, "＋", p.dim) {
-                        new_tab = true;
-                    }
-                });
-            });
+        if Self::tiny_btn(ui, "＋", p.dim) {
+            new_tab = true;
+        }
 
         if let Some(i) = switch_to {
             if i != self.active {
                 self.stash_active();
                 self.activate_tab(i);
             }
+            // 关键一步：只切数据不切视图的话，点了看着像没反应
+            self.switch_mode(ViewMode::Term);
         }
         if let Some(i) = close_at {
             self.close_tab(i);
@@ -2327,6 +2319,15 @@ impl KwDesktopApp {
                         FontId::monospace(10.5),
                         p.dim,
                     );
+
+                    // 竖直分隔：左边是身份，右边是会话标签（原来在第二条 bar 上）
+                    ui.add_space(10.0);
+                    let (sep_rect, _) =
+                        ui.allocate_exact_size(Vec2::new(1.0, 18.0), Sense::hover());
+                    ui.painter()
+                        .rect_filled(sep_rect, CornerRadius::same(0), p.border);
+                    ui.add_space(8.0);
+                    self.draw_tabs(ui);
 
                     if self.busy {
                         ui.add_space(8.0);
