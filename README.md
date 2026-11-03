@@ -3,9 +3,13 @@
 本地 SSH 授权密钥管理台 —— 用来打理服务器上的 `~/.ssh/authorized_keys`：
 看清每把钥匙是谁的、给新设备加一把、把旧钥匙换掉、把不用的删掉。
 
-这是旧版 Electron + Node 实现的 Rust 重写：**前端 `assets/public` 与旧版 `public/`
-逐字节一致**，后端与桌面壳整体替换为 Tauri v2 + axum + russh。同一套核心另外提供了
-`kw-ffi`，供手机端（Flutter）直接调用，不需要在手机上开 HTTP 端口。
+这是旧版 Electron + Node 实现的 Rust 重写：**桌面端已改成纯 Rust 原生界面**
+（eframe / egui），进程内直接调用 `kw-ffi` 暴露的引擎，不再依赖 Tauri、WebView2
+或本地 HTTP；后端与 SSH 层换为 axum + russh。同一套核心通过 `kw-ffi` 也供手机端
+（Flutter）直接调用，两端都不需要开 HTTP 端口。
+
+`assets/public` 仍是浏览器模式的前端（原生 JS + xterm），用于调试和网页入口；
+桌面窗口不加载它。
 
 > 旧版仍在 `../ssh-keywarden`，两版可对照；改代码前先确认动的是哪一版。
 
@@ -17,11 +21,11 @@
 | **搜索 / 筛选** | 按注释、指纹、本地文件名 / 路径、备注实时搜索；一键筛「本地无匹配 / 重复 / 本次在用」 |
 | **备注** | 给钥匙写本地归属备注，只存本机 `key-notes.json`，不写服务器 |
 | **备份与恢复** | 列出同目录 `.bak.YYYYMMDDHHMMSS`，先看差异再恢复；恢复前自动再备份，空备份硬拒绝 |
-| **新增** | 本机生成 Ed25519 / RSA3072（可设 passphrase）、从已有 `.pub` 选、直接粘贴公钥；写入后回读校验 |
+| **新增** | 本机生成 Ed25519 / RSA3072（可设 passphrase）、从已有公钥选、直接粘贴公钥；私钥默认存到本次登录私钥所在目录，注释默认 `用户名@服务器名-日期`（同日重复自动 `-2`、`-3`）；写入后回读校验 |
 | **更换** | 严格三步：先加新钥匙 → 用新私钥**真实登录一次** → 再删旧；验证不过保留旧钥匙 |
 | **删除** | 多选删除；不允许删空，不允许删掉本次连接正在用的钥匙（需二次确认） |
 | **仅密钥登录** | 检测服务器登录方式并直接改 `sshd_config`（含 `sshd_config.d` drop-in）；开启前要求当前确为密钥登录且该钥匙在文件里 |
-| **终端** | 页面内 xterm + WebSocket 终端，支持颜色、滚回、窗口自适应与快捷键粘贴 / 复制 |
+| **终端** | 桌面端是 egui 原生终端（Rust VT 仿真 + russh PTY）；浏览器模式是 xterm + WebSocket（输出走二进制帧） |
 | **纯终端模式** | 只建 SSH 会话开终端，不读家目录、不读 `authorized_keys`；切回密钥模式才按需补读 |
 | **外观** | 6 套手动主题 + 2 套跟随系统；桌面端主题 / 视图 / 窗口状态落盘，重启保持 |
 
@@ -44,10 +48,16 @@ makensis -INPUTCHARSET UTF8 scripts\installer.nsi  # → target/release/bundle/n
 cargo build -p kw-ffi --release
 ```
 
+桌面端不依赖 Node、Tauri 或 WebView2；安装包由 NSIS 的 `makensis` 生成
+（未装 NSIS 时把它加入 PATH，或用完整路径调用）。
+
 首次启动会自动做两件事：
 
 1. 读 `~/.ssh/config`，主机列表为空时把 Host 导入一次；
 2. 从 `IdentityFile` 往上找「密钥文件最多」的那层目录，作为本地密钥库默认扫描目录。
+
+以下登录文件与 Cookie 机制只用于浏览器模式；桌面窗口在进程内直接调用引擎，
+不监听任何端口。
 
 浏览器模式支持 `--port` / `-p`（优先于 `PORT` 环境变量），
 `KW_PUBLIC_DIR` 可指定含 `index.html` 的资源目录；默认查找程序旁 `public/`，
@@ -70,22 +80,24 @@ ssh-keywarden-rs/
 │   ├── kw-store/      config.json / key-notes.json 持久化，~/.ssh/config 导入
 │   ├── kw-ssh/        russh 客户端：连接/认证/exec/原子写/PTY/新钥验登，
 │   │                  known_hosts TOFU，sshd 配置改写
-│   ├── kw-server/     axum 本地 HTTP + WebSocket，桌面嵌入 / 独立浏览器入口
-│   ├── kw-desktop/    Tauri v2 壳：无边框窗口、单实例、剪贴板/对话框、数据目录
-│   └── kw-ffi/        手机端门面：MobileEngine + C ABI，复用 kw-server 的会话与密钥操作；
-│                      微软账号同步（设备码 OAuth2 + Graph）
-├── crates/kw-sync/    桌面同步 CLI：login / sync / status / logout
-├── assets/public/     前端（原生 JS + xterm，与旧版完全一致）
+│   ├── kw-server/     axum 本地 HTTP + WebSocket（浏览器模式），同时也是
+│   │                  桌面端 / 手机端共用的会话与密钥业务层
+│   ├── kw-desktop/    eframe + egui 原生桌面界面：钥匙表、VT 终端、主题/窗口状态落盘
+│   ├── kw-ffi/        桌面端与手机端门面：MobileEngine + C ABI，复用 kw-server 的会话与密钥操作；
+│   │                  微软账号同步（设备码 OAuth2 + Graph）
+│   └── kw-sync/       同步 CLI：login / sync / status / logout
+├── assets/public/     浏览器模式前端（原生 JS + xterm）
 ├── mobile/            Flutter 手机端（直连 kw-ffi，不开 HTTP）
 └── scripts/
-    ├── desktop-smoke.mjs   WebView2 CDP 桌面冒烟
-    └── server-smoke.mjs    Edge CDP 浏览器登录与退出冒烟
+    ├── desktop-smoke.mjs   旧 Tauri/WebView2 外壳的冒烟脚本（现行 eframe 版不适用）
+    └── server-smoke.mjs    浏览器模式登录与退出冒烟
 ```
 
 几个关键约束：
 
-- `kw-keys` 不碰网络与 UI，桌面端与将来的手机端共用；
-- `kw-server` 与 `kw-desktop` 之间只通过本地 HTTP 通信，桌面壳不承载业务；
+- `kw-keys` 不碰网络与 UI，各端共用；
+- 桌面端与手机端都通过 `kw-ffi` 在进程内调用 `kw-server` 的会话/密钥实现，
+  不再经过本地 HTTP；浏览器模式才需要 axum 监听端口；
 - `ssh-key` 0.6 与 russh 内部的 0.7 类型不互通，私钥统一在 `kw-keys` 里解成
   未加密 OpenSSH 文本再交给 russh（`private_key_openssh`）。
 
@@ -175,23 +187,24 @@ KW_SYNC_PASSPHRASE=… ./target/release/kw-sync sync --remember-key
 所以通道是 OneDrive 也不影响安全取舍。
 
 > 手机端 UI 已落在 `mobile/`（Flutter）：三个 Tab 分别是服务器密钥、纯终端、
-> 密钥包·同步（微软账号）。6 套手动主题（曜石 / 午夜 / 石墨 / 云白 / 亚麻 / 雾青）。
+> 密钥包·同步（微软账号）。6 套手动主题（曜石 / 午夜 / 石墨 / 云白 / 亚麻 / 雾青），
+> 选择会写到 `theme.json`，重启保持。
 > Windows 宿主已实跑；Android APK 继续用 NDK 28.2 + cargo-ndk 构建
 > （`dist/android/`：通用包 + arm64 包，三种 ABI 的 `libkw_ffi.so` 都已打进去）。
 > 纯终端是「Rust 侧缓冲 PTY（`termOpen/termRead/termWrite/termResize/termClose`）+
 > Dart 侧 VT 子集仿真」：C ABI 没有回调，所以用长轮询拉输出，轮询跑在独立 isolate 里，
 > 写字同步执行以保证按键顺序。仿真只覆盖常用子集（SGR/CUP/ED/EL/换行与延迟折行/
-> 备用屏/滚动区），不是完整 xterm。
+> 备用屏/滚动区），不是完整 xterm。桌面端另有一套 Rust 侧 VT 仿真，两者不共享代码。
 > 桌面端与手机端共用同一份安全闸门是刻意的，别在 Dart 侧重写一遍。
 
 ## 安全边界
 
 这是能改服务器登录凭据的工具，边界卡得比较死：
 
-- **只监听 `127.0.0.1`**，并严格校验 `Host` 头（挡 DNS rebinding）；
-- 每次启动生成随机令牌；桌面端使用随机端口、浏览器端可配置端口。
-  两个入口均设 `KW_NO_AUTO_COOKIE=1`，**访问首页不会下发 `Set-Cookie`**；
-  桌面端由初始化脚本注入 Cookie，浏览器端需通过临时登录文件换取
+- **浏览器入口只监听 `127.0.0.1`**，并严格校验 `Host` 头（挡 DNS rebinding）；
+  桌面端在进程内调用引擎，**不监听任何端口**；
+- 浏览器模式每次启动生成随机令牌，端口可配置。入口设 `KW_NO_AUTO_COOKIE=1`，
+  **访问首页不会下发 `Set-Cookie`**；需通过临时登录文件换取
   HttpOnly / SameSite=Strict Cookie，登录响应禁止缓存和 Referer 传播；
 - 首次连接确认主机指纹，之后主机密钥变化会被拦下并要求确认（TOFU，存 `known_hosts.json`）；
 - 密码 / passphrase 不写配置文件；认证配置使用 `Secret`，调试输出脱敏，
@@ -231,8 +244,7 @@ KW_SYNC_PASSPHRASE=… ./target/release/kw-sync sync --remember-key
 ```bash
 cargo test --workspace        # 规则层 / 存储 / HTTP / 真实 SSH / 桌面状态 / FFI
 cargo build -p kw-server -p kw-desktop
-node scripts/desktop-smoke.mjs --exe target/debug/kw-desktop.exe
-node scripts/server-smoke.mjs # Windows + Edge；KW_TEST_BROWSER 可指定浏览器程序
+node scripts/server-smoke.mjs # 浏览器模式；Windows + Edge，KW_TEST_BROWSER 可指定浏览器程序
 
 cd mobile
 flutter analyze
@@ -245,23 +257,27 @@ flutter test                  # 需 KW_FFI_LIB 指向 kw_ffi 动态库，详见 
   远端命令/文件使用内存模型，不代替 Linux shell 和 sshd reload 实机测试；
 - `server-smoke.mjs` 使用隔离数据和 Edge profile，验证登录、界面切换、刷新鉴权、
   退出信号和临时登录文件清理；不读取真实主机或密钥；
-- `desktop-smoke.mjs` 通过 WebView2 CDP 验证桥接、主题/视图落盘、令牌注入、
-  首页不自动发 Cookie、窗口最大化与状态落盘；
+- `scripts/desktop-smoke.mjs` 是旧 Tauri/WebView2 外壳的遗留脚本，现行 eframe 版
+  没有 CDP 通道，不能再跑；桌面端以 `cargo test` 与实机操作为准；
 - `kw-ffi` 覆盖密钥落包与扫描、同步包（v2，含墓碑与指纹冲突）明文/加密往返、
   错误口令拒绝、微软同步的配置/令牌落盘与参数校验（不联网）、终端缓冲、
   C ABI 初始化与分发；
 - `kw-sync` 覆盖参数解析（`login` / `sync` / `status` / `logout`、信任列表、JSON 输出）；
 - `mobile/test/ffi_test.dart` 是真 FFI（不是 mock）：初始化、生成密钥、主机 CRUD、
-  备注、加密同步包往返与错误口令拒绝。
+  备注、加密同步包往返与错误口令拒绝；`terminal_input_test.dart` /
+  `terminal_painter_test.dart` 覆盖终端手势与绘制状态。
 
 ## 版本号规则
 
-- 语义化版本，当前 `0.3.1`；
+- 日期制：`v2026.11.3.N`（当天第 N 次），`Cargo.toml` 里存成 `2026.11.3-N`；
 - 单一来源：根 `Cargo.toml` 的 `[workspace.package].version`；
-- 必须同步两处：`crates/kw-desktop/tauri.conf.json` 的 `version`、本仓 `CHANGELOG.md`
-  的 `## v<version>` 标题；
+- 必须同步：`crates/kw-desktop/tauri.conf.json` 的 `version`、本仓 `CHANGELOG.md`
+  的 `## v<version>` 标题；安装脚本 `scripts/installer.nsi` 的 `PRODUCT_VERSION`
+  也要手动跟着改；
 - `kw-desktop` 的单测 `version_matches_tauri_conf_and_changelog` 会在 `cargo test` 时
-  校验这三处一致，漏改直接红。
+  校验 Cargo / tauri.conf / CHANGELOG 三处一致，漏改直接红；
+- 手机端独立编号：`versionName` 是日期，`versionCode` 是 `YYYYMMDDNN` 且必须单调递增，
+  `mobile/lib/src/version.dart` 的展示号跟着 `pubspec.yaml` 走。
 
 ## 已知限制
 
@@ -274,7 +290,6 @@ flutter test                  # 需 KW_FFI_LIB 指向 kw_ffi 动态库，详见 
   设备码登录与 Graph 上传下载尚未用真实账号实网验收。
 - 同步只认内置 `webpki-roots`：企业自签/私有根 CA 环境会连不上；
   Windows 上 `ms-auth.json` 只能靠用户目录 ACL，没有 Unix 那样的 0600。
-- 手机端主题选择不落盘，重启回到曜石（桌面端主题才写 `theme.json`）。
 - 终端是常用 VT 子集，全屏 TUI（vim/htop 的部分特性）可能显示不全；iOS 需要 Xcode 链 `staticlib`。
 - 同步墓碑只留在 `config.json` / `key-notes.json` 里，暂无自动清理。
 - 只处理 `authorized_keys` 里的普通公钥行；`Match` 等 sshd 配置不管。
