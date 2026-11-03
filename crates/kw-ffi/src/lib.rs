@@ -170,6 +170,11 @@ impl MobileEngine {
         monitor::snapshot(&self.state, sid).await.map_err(err_json)
     }
 
+    /// 一次 SSH 往返耗时（毫秒），给信息条显示延迟用。
+    pub async fn ping(&self, sid: &str) -> Result<Value, Value> {
+        monitor::ping(&self.state, sid).await.map_err(err_json)
+    }
+
     /// 代理密码只存本机 `data/proxy-auth.json`，不写 config.json、不进同步包。
     /// 传空字符串 = 忘记该主机的代理密码。
     pub fn set_proxy_password(&self, host_id: &str, password: &str) -> Result<Value, Value> {

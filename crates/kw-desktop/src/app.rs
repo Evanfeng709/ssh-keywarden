@@ -240,6 +240,10 @@ enum BgEvent {
         sid: String,
         message: String,
     },
+    LatencyMeasured {
+        sid: String,
+        ms: u64,
+    },
 }
 
 /// 一个终端标签的完整状态。
@@ -272,6 +276,8 @@ struct TabState {
 
     mon_snap: Option<MonitorSnapshot>,
     mon_error: Option<String>,
+    /// 这个标签自己那条链路的往返耗时，切标签时跟着一起搬
+    lat_ms: Option<u64>,
 }
 
 const SNIPPETS: [(&str, &str); 5] = [
@@ -341,6 +347,10 @@ pub struct KwDesktopApp {
     mon_last_poll: Instant,
     mon_snap: Option<MonitorSnapshot>,
     mon_error: Option<String>,
+
+    /// 最近一次 SSH 往返耗时（毫秒），信息条末尾显示。
+    lat_ms: Option<u64>,
+    lat_last: Instant,
     mon_stale: bool,
     mon_cpu_hist: VecDeque<f64>,
     mon_mem_hist: VecDeque<f64>,
@@ -449,6 +459,8 @@ impl KwDesktopApp {
             mon_last_poll: Instant::now(),
             mon_snap: None,
             mon_error: None,
+            lat_ms: None,
+            lat_last: Instant::now(),
             mon_stale: false,
             mon_cpu_hist: VecDeque::new(),
             mon_mem_hist: VecDeque::new(),
@@ -537,6 +549,7 @@ impl KwDesktopApp {
         t.files_selected = self.files_selected.clone();
         t.mon_snap = self.mon_snap.clone();
         t.mon_error = self.mon_error.clone();
+        t.lat_ms = self.lat_ms;
     }
 
     /// 把 `tabs[idx]` 的状态摊回 self 上的那批字段 —— 之后所有老代码都作用在新会话上。
@@ -559,6 +572,7 @@ impl KwDesktopApp {
         self.files_selected = t.files_selected;
         self.mon_snap = t.mon_snap;
         self.mon_error = t.mon_error;
+        self.lat_ms = t.lat_ms;
         self.files_loading = false;
         self.term_focused = true;
     }
@@ -582,6 +596,7 @@ impl KwDesktopApp {
             files_selected: None,
             mon_snap: None,
             mon_error: None,
+            lat_ms: None,
         });
         self.active = self.tabs.len() - 1;
         self.session = None;
@@ -597,6 +612,7 @@ impl KwDesktopApp {
         self.files_selected = None;
         self.mon_snap = None;
         self.mon_error = None;
+        self.lat_ms = None;
         self.term_focused = true;
     }
 
@@ -711,8 +727,30 @@ impl KwDesktopApp {
         self.mon_last_poll = Instant::now();
     }
 
-    fn poll_monitor(&mut self, force: bool) {
-        if self.mon_polling || self.mon_paused {
+    /// 每 10 秒量一次 SSH 往返，喂给信息条末尾的延迟。
+    ///
+    /// 用 `exec("true")` 而不是复用 monitor 的快照 —— 后者要读一堆 /proc，
+    /// 量出来的是「采集耗时」而不是链路往返。
+    fn poll_latency(&mut self) {
+        let Some(sid) = self.current_sid() else {
+            return;
+        };
+        if self.lat_last.elapsed() < Duration::from_secs(10) {
+            return;
+        }
+        self.lat_last = Instant::now();
+        let engine = Arc::clone(&self.engine);
+        let tx = self.tx.clone();
+        self.rt.spawn(async move {
+            if let Ok(v) = engine.ping(&sid).await {
+                if let Some(ms) = v.get("ms").and_then(|x| x.as_u64()) {
+                    let _ = tx.send(BgEvent::LatencyMeasured { sid, ms });
+                }
+            }
+        });
+    }
+
+    fn poll_monitor(&mut self, force: bool) {        if self.mon_polling || self.mon_paused {
             return;
         }
         let Some(sid) = self.current_sid() else {
@@ -1769,6 +1807,15 @@ impl KwDesktopApp {
                     }
                     self.mon_error = Some(message);
                 }
+                BgEvent::LatencyMeasured { sid, ms } => {
+                    if self.current_sid().as_deref() != Some(sid.as_str()) {
+                        continue;
+                    }
+                    self.lat_ms = Some(ms);
+                    if let Some(t) = self.tabs.get_mut(self.active) {
+                        t.lat_ms = Some(ms);
+                    }
+                }
             }
         }
     }
@@ -1876,6 +1923,9 @@ impl eframe::App for KwDesktopApp {
         // 监控页要画图表，终端页要喂信息条 —— 两边共用同一个节流
         if matches!(self.mode, ViewMode::Monitor | ViewMode::Term) {
             self.poll_monitor(false);
+        }
+        if self.mode == ViewMode::Term {
+            self.poll_latency();
         }
 
         self.render_tabbar(ctx);
@@ -2060,6 +2110,9 @@ impl KwDesktopApp {
                 Self::fmt_rate(s.net.rx_bytes_per_sec),
                 Self::fmt_rate(s.net.tx_bytes_per_sec)
             ));
+        }
+        if let Some(ms) = self.lat_ms {
+            metrics.push(format!("{ms}ms"));
         }
 
         let mut do_copy = false;
