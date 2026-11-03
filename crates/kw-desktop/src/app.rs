@@ -1405,16 +1405,6 @@ impl KwDesktopApp {
             .map(str::to_string)
     }
 
-    /// 当前会话对应的主机 id，用于判断「这台主机是不是已经开着标签了」。
-    fn current_host_id(&self) -> Option<String> {
-        self.session
-            .as_ref()?
-            .get("host")?
-            .get("id")?
-            .as_str()
-            .map(str::to_string)
-    }
-
     /// 本次登录私钥所在目录，新增/更换密钥默认保存到这里。
     fn current_login_key_dir(&self) -> Option<String> {
         let file = self
@@ -1512,8 +1502,34 @@ impl KwDesktopApp {
                         .filter(|s| !s.is_empty())
                         .unwrap_or("已连接主机")
                         .to_string();
-                    self.mon_ident = Some((label, endpoint.clone()));
+                    self.mon_ident = Some((label.clone(), endpoint.clone()));
+
+                    // 连接成功即建标签（对齐 Netcatty：连上就有终端标签）。
+                    // 顺序要紧：push_tab 会把 self.session 置空，所以必须建完标签再赋值会话。
+                    let host_id = session
+                        .get("host")
+                        .and_then(|h| h.get("id"))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    if !host_id.is_empty() {
+                        if let Some(i) = self.tab_of_host(&host_id) {
+                            // 重连同一台：切回原标签，不重复开
+                            if i != self.active {
+                                self.stash_active();
+                                self.activate_tab(i);
+                            }
+                        } else {
+                            self.push_tab(label.clone(), host_id);
+                        }
+                    }
+
                     self.session = Some(session);
+                    // 标签里也存一份，切走再切回来会话还在
+                    if let Some(t) = self.tabs.get_mut(self.active) {
+                        t.session = self.session.clone();
+                        t.title = label;
+                    }
                     self.selected_indices.clear();
                     self.sshd_info = None;
                     self.files_path.clear();
@@ -2862,22 +2878,7 @@ impl KwDesktopApp {
                                 pasted_pub: String::new(),
                             };
                         }
-                        if Self::action_btn(ui, &p, ">_ 打开终端", false, false).clicked() {
-                            // 同一台主机已经开着标签就切过去，别重复开一堆
-                            let host_id = self.current_host_id().unwrap_or_default();
-                            if let Some(i) = self.tab_of_host(&host_id) {
-                                if i != self.active {
-                                    self.stash_active();
-                                    self.activate_tab(i);
-                                }
-                            } else if self.session.is_some() {
-                                let title = self
-                                    .current_host_label()
-                                    .unwrap_or_else(|| "新终端".to_string());
-                                self.push_tab(title, host_id);
-                            }
-                            self.switch_mode(ViewMode::Term);
-                        }
+                        // 「打开终端」按钮已移除：连接成功即建标签（见 BgEvent::Connected）
                         if Self::action_btn(ui, &p, "文件管理", false, false).clicked() {
                             self.switch_mode(ViewMode::Files);
                         }
