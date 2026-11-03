@@ -1,0 +1,38 @@
+#!/bin/sh
+# 手机端提交前跑 flutter test。
+#
+# 起因：kMobileVersion 写成不补零的 v2026.11.3.1，version_test 红了三天没人发现。
+#
+# 只在 staged 里有 mobile/ 文件时才跑 —— 改 Rust 不该等 Flutter 测试。
+# 启用：git config core.hooksPath .githooks
+
+staged=$(git diff --cached --name-only --diff-filter=ACM 2>/dev/null | grep -E '^mobile/' || true)
+if [ -z "$staged" ]; then
+  exit 0
+fi
+
+if ! command -v flutter >/dev/null 2>&1; then
+  echo "[pre-commit] 找不到 flutter，跳过手机端测试" >&2
+  echo "[pre-commit] 请手动跑：cd mobile && flutter test" >&2
+  exit 0
+fi
+
+# 系统/编辑器注入的代理会让 flutter_tester 的 WebSocket 握手失败，
+# 报 "Invalid WebSocket upgrade request"，看起来像测试挂了。
+unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY ALL_PROXY all_proxy
+
+echo "[pre-commit] 检测到手机端改动，跑 flutter test …"
+out=$(cd mobile && flutter test 2>&1)
+code=$?
+
+if [ $code -ne 0 ]; then
+  echo "$out" | tail -30
+  echo ""
+  echo "[pre-commit] ✗ 手机端测试未通过，提交已阻止。" >&2
+  echo "[pre-commit]   确实要跳过可用 git commit --no-verify，但先看清为什么红。" >&2
+  exit 1
+fi
+
+echo "$out" | tail -2
+echo "[pre-commit] ✓ 手机端测试通过"
+exit 0
