@@ -68,6 +68,7 @@ enum ParseState {
     OscEsc,
 }
 
+#[derive(Clone)]
 pub struct VtScreen {
     cols: usize,
     rows: usize,

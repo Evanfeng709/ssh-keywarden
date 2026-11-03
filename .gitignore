@@ -29,3 +29,6 @@ mobile/ios/Flutter/Generated.xcconfig
 .DS_Store
 Thumbs.db
 *.log
+
+# 终端调试截图等临时产物
+mobile/.tmp/

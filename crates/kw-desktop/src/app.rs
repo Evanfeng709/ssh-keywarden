@@ -9,9 +9,9 @@ use std::time::{Duration, Instant, SystemTime};
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
 use eframe::egui::{
-    self, Align, Color32, CornerRadius, CursorIcon, Event, FontData, FontDefinitions, FontFamily,
-    FontId, Frame, Id, Key, Layout, Margin, Order, Pos2, Rect, RichText, ScrollArea, Sense, Stroke,
-    StrokeKind, Vec2, ViewportCommand,
+    self, Align, Align2, Color32, CornerRadius, CursorIcon, Event, FontData, FontDefinitions,
+    FontFamily, FontId, Frame, Id, Key, Layout, Margin, Order, Pos2, Rect, RichText, ScrollArea,
+    Sense, Stroke, StrokeKind, Vec2, ViewportCommand,
 };
 use serde_json::{json, Value};
 
@@ -215,8 +215,15 @@ enum BgEvent {
         cols: usize,
         rows: usize,
     },
-    TermOutput(Vec<u8>),
-    TermClosed(Option<String>),
+    /// 带上 term_id：多会话时要分得清是哪块 PTY 吐的字。
+    TermOutput {
+        term_id: String,
+        bytes: Vec<u8>,
+    },
+    TermClosed {
+        term_id: String,
+        error: Option<String>,
+    },
     FilesListed {
         path: String,
         entries: Vec<Value>,
@@ -233,6 +240,38 @@ enum BgEvent {
         sid: String,
         message: String,
     },
+}
+
+/// 一个终端标签的完整状态。
+///
+/// 设计取舍：没有把 `self.session` / `self.files_*` / `self.mon_*` 改成
+/// `self.tabs[i].xxx`（那是 150 多处引用，漏改一处就串台），而是反过来 ——
+/// **当前活动标签的状态摊在 `self` 上**，老代码照旧读写；
+/// 切换标签时做一次 [`KwDesktopApp::stash_active`] / [`KwDesktopApp::activate_tab`] 搬运。
+///
+/// 代价是切换时一次 clone（VtScreen 只有几十 KB），换来改动面极小。
+#[derive(Clone)]
+struct TabState {
+    /// 标签上显示的名字（user@host）
+    title: String,
+    /// 关联的 host.id：从主机页点「打开终端」时用它找已有标签，避免重复开
+    host_id: String,
+
+    session: Option<Value>,
+    term_id: Option<String>,
+    vt: VtScreen,
+    term_scroll_offset: usize,
+    last_sent_size: (usize, usize),
+
+    files_path: String,
+    files_path_input: String,
+    files_entries: Vec<Value>,
+    files_loaded: bool,
+    files_error: Option<String>,
+    files_selected: Option<String>,
+
+    mon_snap: Option<MonitorSnapshot>,
+    mon_error: Option<String>,
 }
 
 const SNIPPETS: [(&str, &str); 5] = [
@@ -278,6 +317,10 @@ pub struct KwDesktopApp {
     term_scroll_offset: usize,
     term_focused: bool,
     last_sent_size: (usize, usize),
+
+    /// 多会话标签。空 = 没有任何终端会话；`active` 指向「状态摊在 self 上」的那个。
+    tabs: Vec<TabState>,
+    active: usize,
 
     files_path: String,
     files_path_input: String,
@@ -386,6 +429,8 @@ impl KwDesktopApp {
             term_scroll_offset: 0,
             term_focused: false,
             last_sent_size: (100, 30),
+            tabs: Vec::new(),
+            active: 0,
             files_path: String::new(),
             files_path_input: String::new(),
             files_entries: Vec::new(),
@@ -468,6 +513,149 @@ impl KwDesktopApp {
             let scan = state.scan_local(&settings.local_key_dir, force).await;
             let _ = tx.send(BgEvent::LocalScanDone(scan.entries));
         });
+    }
+
+    /* ------------------------------------------------------------------ */
+    /* 多会话标签                                                          */
+    /* ------------------------------------------------------------------ */
+
+    /// 把「摊在 self 上的活动会话状态」存回 `tabs[active]`。
+    fn stash_active(&mut self) {
+        let Some(t) = self.tabs.get_mut(self.active) else {
+            return;
+        };
+        t.session = self.session.clone();
+        t.term_id = self.term_id.clone();
+        t.vt = self.vt.clone();
+        t.term_scroll_offset = self.term_scroll_offset;
+        t.last_sent_size = self.last_sent_size;
+        t.files_path = self.files_path.clone();
+        t.files_path_input = self.files_path_input.clone();
+        t.files_entries = self.files_entries.clone();
+        t.files_loaded = self.files_loaded;
+        t.files_error = self.files_error.clone();
+        t.files_selected = self.files_selected.clone();
+        t.mon_snap = self.mon_snap.clone();
+        t.mon_error = self.mon_error.clone();
+    }
+
+    /// 把 `tabs[idx]` 的状态摊回 self 上的那批字段 —— 之后所有老代码都作用在新会话上。
+    fn activate_tab(&mut self, idx: usize) {
+        if idx >= self.tabs.len() {
+            return;
+        }
+        let t = self.tabs[idx].clone();
+        self.active = idx;
+        self.session = t.session;
+        self.term_id = t.term_id;
+        self.vt = t.vt;
+        self.term_scroll_offset = t.term_scroll_offset;
+        self.last_sent_size = t.last_sent_size;
+        self.files_path = t.files_path;
+        self.files_path_input = t.files_path_input;
+        self.files_entries = t.files_entries;
+        self.files_loaded = t.files_loaded;
+        self.files_error = t.files_error;
+        self.files_selected = t.files_selected;
+        self.mon_snap = t.mon_snap;
+        self.mon_error = t.mon_error;
+        self.files_loading = false;
+        self.term_focused = true;
+    }
+
+    /// 新建一个空标签并切过去；`session` 留空，等连接流程填。
+    fn push_tab(&mut self, title: String, host_id: String) {
+        self.stash_active();
+        self.tabs.push(TabState {
+            title,
+            host_id,
+            session: None,
+            term_id: None,
+            vt: VtScreen::new(100, 30),
+            term_scroll_offset: 0,
+            last_sent_size: (100, 30),
+            files_path: String::new(),
+            files_path_input: String::new(),
+            files_entries: Vec::new(),
+            files_loaded: false,
+            files_error: None,
+            files_selected: None,
+            mon_snap: None,
+            mon_error: None,
+        });
+        self.active = self.tabs.len() - 1;
+        self.session = None;
+        self.term_id = None;
+        self.vt = VtScreen::new(100, 30);
+        self.term_scroll_offset = 0;
+        self.last_sent_size = (100, 30);
+        self.files_path.clear();
+        self.files_path_input.clear();
+        self.files_entries.clear();
+        self.files_loaded = false;
+        self.files_error = None;
+        self.files_selected = None;
+        self.mon_snap = None;
+        self.mon_error = None;
+        self.term_focused = true;
+    }
+
+    /// 关闭一个标签：先放掉它的 PTY 和 SSH 会话，再从列表移除；关的是当前标签就切到相邻的。
+    fn close_tab(&mut self, idx: usize) {
+        if idx >= self.tabs.len() {
+            return;
+        }
+        // 取这个标签自己的 sid / termId，不必先切过去
+        let (sid, tid) = if idx == self.active {
+            (self.current_sid(), self.term_id.clone())
+        } else {
+            let t = &self.tabs[idx];
+            (
+                t.session
+                    .as_ref()
+                    .and_then(|s| s.get("sid"))
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string),
+                t.term_id.clone(),
+            )
+        };
+
+        if sid.is_some() || tid.is_some() {
+            let engine = Arc::clone(&self.engine);
+            self.rt.spawn(async move {
+                if let Some(tid) = tid {
+                    let _ = engine.term_close(&tid).await;
+                }
+                if let Some(sid) = sid {
+                    let _ = engine.disconnect(&sid).await;
+                }
+            });
+        }
+
+        self.tabs.remove(idx);
+        if self.tabs.is_empty() {
+            self.active = 0;
+            self.session = None;
+            self.term_id = None;
+            self.vt = VtScreen::new(100, 30);
+            self.files_entries.clear();
+            self.files_loaded = false;
+            self.mon_snap = None;
+            self.push_log("已关闭最后一个终端标签", LogKind::Info);
+            return;
+        }
+
+        // 切到剩下的相邻标签（activate_tab 内部会重设 active）
+        let keep = idx.min(self.tabs.len() - 1);
+        self.activate_tab(keep);
+    }
+
+    /// 找某个 host 已经开着的标签，用于「打开终端」时复用。
+    fn tab_of_host(&self, host_id: &str) -> Option<usize> {
+        if host_id.is_empty() {
+            return None;
+        }
+        self.tabs.iter().position(|t| t.host_id == host_id)
     }
 
     fn switch_mode(&mut self, next: ViewMode) {
@@ -830,12 +1018,18 @@ impl KwDesktopApp {
                                 if let Some(b64) = chunk.get("data").and_then(|x| x.as_str()) {
                                     if !b64.is_empty() {
                                         if let Ok(bytes) = B64.decode(b64) {
-                                            let _ = tx.send(BgEvent::TermOutput(bytes));
+                                            let _ = tx.send(BgEvent::TermOutput {
+                                                term_id: tid.clone(),
+                                                bytes,
+                                            });
                                         }
                                     }
                                 }
                                 if chunk.get("closed").and_then(|x| x.as_bool()) == Some(true) {
-                                    let _ = tx.send(BgEvent::TermClosed(None));
+                                    let _ = tx.send(BgEvent::TermClosed {
+                                        term_id: tid.clone(),
+                                        error: None,
+                                    });
                                     break;
                                 }
                             }
@@ -844,7 +1038,10 @@ impl KwDesktopApp {
                                     .get("error")
                                     .and_then(|x| x.as_str())
                                     .map(|s| s.to_string());
-                                let _ = tx.send(BgEvent::TermClosed(msg));
+                                let _ = tx.send(BgEvent::TermClosed {
+                                    term_id: tid.clone(),
+                                    error: msg,
+                                });
                                 break;
                             }
                         }
@@ -856,7 +1053,11 @@ impl KwDesktopApp {
                         .and_then(|x| x.as_str())
                         .unwrap_or("打开终端失败")
                         .to_string();
-                    let _ = tx.send(BgEvent::TermClosed(Some(msg)));
+                    // 还没拿到 tid 就失败了，用空串表示「不属于任何已有会话」
+                    let _ = tx.send(BgEvent::TermClosed {
+                        term_id: String::new(),
+                        error: Some(msg),
+                    });
                 }
             }
         });
@@ -1166,6 +1367,16 @@ impl KwDesktopApp {
             .map(str::to_string)
     }
 
+    /// 当前会话对应的主机 id，用于判断「这台主机是不是已经开着标签了」。
+    fn current_host_id(&self) -> Option<String> {
+        self.session
+            .as_ref()?
+            .get("host")?
+            .get("id")?
+            .as_str()
+            .map(str::to_string)
+    }
+
     /// 本次登录私钥所在目录，新增/更换密钥默认保存到这里。
     fn current_login_key_dir(&self) -> Option<String> {
         let file = self
@@ -1463,22 +1674,32 @@ impl KwDesktopApp {
                     cols,
                     rows,
                 } => {
-                    self.term_id = Some(term_id);
+                    self.term_id = Some(term_id.clone());
                     self.vt.resize(cols, rows);
                     self.last_sent_size = (cols, rows);
+                    // 同步到标签：标签栏的连接圆点靠它判断在线
+                    if let Some(t) = self.tabs.get_mut(self.active) {
+                        t.term_id = Some(term_id);
+                    }
                     self.push_log(format!("SSH 终端已就绪 ({cols}×{rows})"), LogKind::Ok);
                 }
-                BgEvent::TermOutput(bytes) => {
-                    self.vt.feed(&bytes);
-                    self.term_scroll_offset = 0;
-                    ctx.request_repaint();
+                BgEvent::TermOutput { term_id, bytes } => {
+                    // 只渲染当前会话的输出；非活动会话的输出在切换逻辑里落到各自的屏幕
+                    if self.term_id.as_deref() == Some(term_id.as_str()) {
+                        self.vt.feed(&bytes);
+                        self.term_scroll_offset = 0;
+                        ctx.request_repaint();
+                    }
                 }
-                BgEvent::TermClosed(err) => {
-                    self.term_id = None;
-                    if let Some(msg) = err {
-                        self.push_log(format!("终端已关闭：{msg}"), LogKind::Warn);
-                    } else {
-                        self.push_log("SSH 终端会话已结束", LogKind::Info);
+                BgEvent::TermClosed { term_id, error } => {
+                    // 空 term_id = 还没开起来就失败了，也归当前会话处理
+                    if term_id.is_empty() || self.term_id.as_deref() == Some(term_id.as_str()) {
+                        self.term_id = None;
+                        if let Some(msg) = error {
+                            self.push_log(format!("终端已关闭：{msg}"), LogKind::Warn);
+                        } else {
+                            self.push_log("SSH 终端会话已结束", LogKind::Info);
+                        }
                     }
                 }
                 BgEvent::FilesListed { path, entries } => {
@@ -1656,6 +1877,8 @@ impl eframe::App for KwDesktopApp {
             self.poll_monitor(false);
         }
 
+        self.render_tabbar(ctx);
+
         egui::CentralPanel::default()
             .frame(
                 Frame::NONE
@@ -1674,6 +1897,111 @@ impl eframe::App for KwDesktopApp {
 }
 
 impl KwDesktopApp {
+    /// 顶部多会话标签栏。没有任何会话时整条不出现。
+    fn render_tabbar(&mut self, ctx: &egui::Context) {
+        if self.tabs.is_empty() {
+            return;
+        }
+        let p = self.palette;
+        // 先快照：闭包里不能再借 self，否则和后面的 stash/activate 打架
+        let snap: Vec<(String, bool, bool)> = self
+            .tabs
+            .iter()
+            .enumerate()
+            .map(|(i, t)| (t.title.clone(), i == self.active, t.term_id.is_some()))
+            .collect();
+        let mut switch_to: Option<usize> = None;
+        let mut close_at: Option<usize> = None;
+        let font = FontId::proportional(12.0);
+
+        egui::TopBottomPanel::top("kw_tabbar")
+            .exact_height(38.0)
+            .frame(
+                Frame::NONE
+                    .fill(p.bg_elev)
+                    .stroke(Stroke::new(1.0_f32, p.border))
+                    .inner_margin(Margin::symmetric(10, 7)),
+            )
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 6.0;
+                    for (i, (title, active, connected)) in snap.iter().enumerate() {
+                        let text_w = ui
+                            .painter()
+                            .layout_no_wrap(title.clone(), font.clone(), p.text)
+                            .size()
+                            .x;
+                        let (rect, resp) =
+                            ui.allocate_exact_size(Vec2::new(text_w + 38.0, 24.0), Sense::click());
+
+                        ui.painter().rect_filled(
+                            rect,
+                            CornerRadius::same(6),
+                            if *active { p.accent_soft } else { p.surface3 },
+                        );
+                        if *active {
+                            ui.painter().rect_stroke(
+                                rect,
+                                CornerRadius::same(6),
+                                Stroke::new(1.0_f32, p.accent),
+                                StrokeKind::Inside,
+                            );
+                        }
+
+                        // 左侧圆点：绿=终端在线，灰=还没连上
+                        ui.painter().circle_filled(
+                            rect.left_center() + Vec2::new(9.0, 0.0),
+                            2.5,
+                            if *connected { p.ok } else { p.faint },
+                        );
+                        ui.painter().text(
+                            rect.left_center() + Vec2::new(18.0, 0.0),
+                            Align2::LEFT_CENTER,
+                            title,
+                            font.clone(),
+                            if *active { p.text } else { p.dim },
+                        );
+
+                        // 右侧关闭 ×
+                        let x_rect = Rect::from_center_size(
+                            Pos2::new(rect.right() - 11.0, rect.center().y),
+                            Vec2::splat(14.0),
+                        );
+                        let x_resp =
+                            ui.interact(x_rect, Id::new(("kw_tab_close", i)), Sense::click());
+                        let xc = if x_resp.hovered() { p.danger } else { p.faint };
+                        let c = x_rect.center();
+                        let r = 3.2;
+                        ui.painter().line_segment(
+                            [Pos2::new(c.x - r, c.y - r), Pos2::new(c.x + r, c.y + r)],
+                            Stroke::new(1.2_f32, xc),
+                        );
+                        ui.painter().line_segment(
+                            [Pos2::new(c.x + r, c.y - r), Pos2::new(c.x - r, c.y + r)],
+                            Stroke::new(1.2_f32, xc),
+                        );
+
+                        if resp.clicked() {
+                            switch_to = Some(i);
+                        }
+                        if x_resp.clicked() {
+                            close_at = Some(i);
+                        }
+                    }
+                });
+            });
+
+        if let Some(i) = switch_to {
+            if i != self.active {
+                self.stash_active();
+                self.activate_tab(i);
+            }
+        }
+        if let Some(i) = close_at {
+            self.close_tab(i);
+        }
+    }
+
     fn render_topbar(&mut self, ctx: &egui::Context, maximized: bool) {
         let p = self.palette;
         egui::TopBottomPanel::top("kw_topbar")
@@ -2280,6 +2608,19 @@ impl KwDesktopApp {
                             };
                         }
                         if Self::action_btn(ui, &p, ">_ 打开终端", false, false).clicked() {
+                            // 同一台主机已经开着标签就切过去，别重复开一堆
+                            let host_id = self.current_host_id().unwrap_or_default();
+                            if let Some(i) = self.tab_of_host(&host_id) {
+                                if i != self.active {
+                                    self.stash_active();
+                                    self.activate_tab(i);
+                                }
+                            } else if self.session.is_some() {
+                                let title = self
+                                    .current_host_label()
+                                    .unwrap_or_else(|| "新终端".to_string());
+                                self.push_tab(title, host_id);
+                            }
                             self.switch_mode(ViewMode::Term);
                         }
                         if Self::action_btn(ui, &p, "文件管理", false, false).clicked() {
