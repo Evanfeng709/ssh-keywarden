@@ -1,24 +1,12 @@
-//! 桌面壳的杂活：数据目录、主题/视图持久化、窗口状态、原生选择器与剪贴板。
-//!
-//! 页面永远从内置的 127.0.0.1 服务加载（与旧 Electron 版同一套前端），
-//! 壳只负责窗口和系统能力，业务全在 kw-server 里。
+//! 桌面端本地持久化：数据目录、旧版迁移、主题/视图设置、窗口状态与工作集修剪。
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, RwLock};
 
 use serde_json::{json, Value};
-use tauri::webview::{NewWindowResponse, PageLoadEvent};
-use tauri::{
-    AppHandle, Manager, PhysicalPosition, State, Url, WebviewUrl, WebviewWindow,
-    WebviewWindowBuilder, WindowEvent,
-};
-use tauri_plugin_clipboard_manager::ClipboardExt;
-use tauri_plugin_dialog::DialogExt;
-use tauri_plugin_opener::OpenerExt;
 
 /// 与旧版 `electron/main.js` 的 THEME_CHOICES 一致
-const THEMES: [&str; 8] = [
+pub const THEMES: [&str; 8] = [
     "obsidian",
     "midnight",
     "graphite",
@@ -31,65 +19,15 @@ const THEMES: [&str; 8] = [
 
 const DATA_FILES: [&str; 3] = ["config.json", "known_hosts.json", "key-notes.json"];
 
-const DEFAULT_WIDTH: u32 = 1280;
-const DEFAULT_HEIGHT: u32 = 820;
-const MIN_WIDTH: u32 = 1024;
-const MIN_HEIGHT: u32 = 680;
+#[allow(dead_code)]
+pub const DEFAULT_WIDTH: u32 = 1280;
+#[allow(dead_code)]
+pub const DEFAULT_HEIGHT: u32 = 820;
+pub const MIN_WIDTH: u32 = 1024;
+pub const MIN_HEIGHT: u32 = 680;
 
-pub struct Desktop {
-    pub data_dir: PathBuf,
-    theme: RwLock<String>,
-    ui: RwLock<Value>,
-    server: Mutex<Option<kw_server::RunningServer>>,
-}
-
-impl Desktop {
-    pub fn load(data_dir: PathBuf) -> Self {
-        let theme = read_theme(&data_dir);
-        let ui = read_ui(&data_dir);
-        Self {
-            data_dir,
-            theme: RwLock::new(theme),
-            ui: RwLock::new(ui),
-            server: Mutex::new(None),
-        }
-    }
-
-    fn theme(&self) -> String {
-        self.theme.read().map(|v| v.clone()).unwrap_or_default()
-    }
-
-    fn ui(&self) -> Value {
-        self.ui
-            .read()
-            .map(|v| v.clone())
-            .unwrap_or_else(|_| default_ui())
-    }
-
-    /// 注入到页面最前面的脚本：先把主题/视图/会话令牌同步塞进 window，再挂桌面桥。
-    ///
-    /// 令牌只在这里出现一次：bridge.js 立刻把它写进当前 origin 的 Cookie，
-    /// 然后从 `window.__KW_INIT` 上删掉，页面脚本读不到它。
-    fn init_script(&self, token: &str) -> String {
-        let payload = json!({ "theme": self.theme(), "ui": self.ui(), "token": token });
-        format!(
-            "window.__KW_INIT = {payload};\n{}",
-            include_str!("../bridge.js")
-        )
-    }
-
-    pub fn put_server(&self, server: kw_server::RunningServer) {
-        if let Ok(mut slot) = self.server.lock() {
-            *slot = Some(server);
-        }
-    }
-
-    pub fn take_server(&self) -> Option<kw_server::RunningServer> {
-        self.server.lock().ok().and_then(|mut slot| slot.take())
-    }
-}
-
-fn default_ui() -> Value {
+#[allow(dead_code)]
+pub fn default_ui() -> Value {
     json!({ "mode": "keys", "termHeight": 0 })
 }
 
@@ -98,7 +36,7 @@ fn default_ui() -> Value {
 /* ------------------------------------------------------------------ */
 
 /// `KW_DATA_DIR` 优先；否则与旧 Electron 版同址：
-/// `app.getPath('userData')` 取 package name，即 `%APPDATA%\ssh-keywarden\data`。
+/// `%APPDATA%\ssh-keywarden\data`。
 pub fn resolve_data_dir() -> PathBuf {
     if let Some(dir) = std::env::var_os("KW_DATA_DIR") {
         return PathBuf::from(dir);
@@ -113,8 +51,7 @@ pub fn resolve_data_dir() -> PathBuf {
 }
 
 /// 目标目录还没有 config.json 时，从安装目录旁的 `data` 复制三个数据文件。
-/// 便携版（exe 旁边带 data）升级到正式安装时靠这一步接管旧配置。
-fn migrate_data(target: &Path, candidate: &Path) {
+pub fn migrate_data(target: &Path, candidate: &Path) {
     if target.join("config.json").exists() || !candidate.join("config.json").exists() {
         return;
     }
@@ -131,7 +68,7 @@ fn migrate_data(target: &Path, candidate: &Path) {
     }
 }
 
-fn exe_data_dir() -> Option<PathBuf> {
+pub fn exe_data_dir() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
     let dir = exe.parent()?.join("data");
     dir.is_dir().then_some(dir)
@@ -141,7 +78,7 @@ fn exe_data_dir() -> Option<PathBuf> {
 /* 主题 / 视图                                                         */
 /* ------------------------------------------------------------------ */
 
-fn read_theme(data_dir: &Path) -> String {
+pub fn read_theme(data_dir: &Path) -> String {
     let raw = fs::read_to_string(data_dir.join("theme.json")).unwrap_or_default();
     let value: Value = serde_json::from_str(&raw).unwrap_or(Value::Null);
     let choice = value.get("choice").and_then(|v| v.as_str()).unwrap_or("");
@@ -152,7 +89,16 @@ fn read_theme(data_dir: &Path) -> String {
     }
 }
 
-fn read_ui(data_dir: &Path) -> Value {
+pub fn save_theme(data_dir: &Path, choice: &str) -> Result<(), String> {
+    if !THEMES.contains(&choice) {
+        return Err("未知主题".into());
+    }
+    let _ = fs::create_dir_all(data_dir);
+    write_json_atomic(&data_dir.join("theme.json"), &json!({ "choice": choice }))
+        .map_err(|e| format!("无法保存主题：{e}"))
+}
+
+pub fn read_ui(data_dir: &Path) -> Value {
     let raw = fs::read_to_string(data_dir.join("ui.json")).unwrap_or_default();
     let value: Value = serde_json::from_str(&raw).unwrap_or(Value::Null);
     let mode = match value.get("mode").and_then(|v| v.as_str()) {
@@ -168,10 +114,73 @@ fn read_ui(data_dir: &Path) -> Value {
     json!({ "mode": mode, "termHeight": term_height })
 }
 
-fn write_json_atomic(file: &Path, value: &Value) -> std::io::Result<()> {
+pub fn save_ui_mode(data_dir: &Path, mode: &str, term_height: i64) {
+    let m = if mode == "term" { "term" } else { "keys" };
+    let h = if (180..=10_000).contains(&term_height) {
+        term_height
+    } else {
+        0
+    };
+    let _ = fs::create_dir_all(data_dir);
+    let _ = write_json_atomic(
+        &data_dir.join("ui.json"),
+        &json!({ "mode": m, "termHeight": h }),
+    );
+}
+
+pub fn write_json_atomic(file: &Path, value: &Value) -> std::io::Result<()> {
+    let bytes = serde_json::to_vec(value)?;
     let tmp = PathBuf::from(format!("{}.tmp", file.display()));
-    fs::write(&tmp, serde_json::to_vec(value)?)?;
-    fs::rename(&tmp, file)
+    if fs::write(&tmp, &bytes).is_ok() && fs::rename(&tmp, file).is_ok() {
+        return Ok(());
+    }
+    let _ = fs::remove_file(&tmp);
+    fs::write(file, &bytes)
+}
+
+#[cfg(windows)]
+pub fn is_system_dark() -> bool {
+    #[link(name = "advapi32")]
+    extern "system" {
+        fn RegGetValueW(
+            hkey: isize,
+            lp_sub_key: *const u16,
+            lp_value: *const u16,
+            dw_flags: u32,
+            pdw_type: *mut u32,
+            pv_data: *mut u32,
+            pcb_data: *mut u32,
+        ) -> i32;
+    }
+    const HKEY_CURRENT_USER: isize = -0x7fffffff_isize - 1; // 0x80000001
+    const RRF_RT_REG_DWORD: u32 = 0x0000_0010;
+    let sub_key: Vec<u16> = "Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize\0"
+        .encode_utf16()
+        .collect();
+    let val_name: Vec<u16> = "AppsUseLightTheme\0".encode_utf16().collect();
+    let mut data: u32 = 0;
+    let mut size: u32 = std::mem::size_of::<u32>() as u32;
+    let status = unsafe {
+        RegGetValueW(
+            HKEY_CURRENT_USER,
+            sub_key.as_ptr(),
+            val_name.as_ptr(),
+            RRF_RT_REG_DWORD,
+            std::ptr::null_mut(),
+            &mut data,
+            &mut size,
+        )
+    };
+    if status == 0 {
+        data == 0
+    } else {
+        true
+    }
+}
+
+#[cfg(not(windows))]
+pub fn is_system_dark() -> bool {
+    true
 }
 
 /* ------------------------------------------------------------------ */
@@ -179,16 +188,15 @@ fn write_json_atomic(file: &Path, value: &Value) -> std::io::Result<()> {
 /* ------------------------------------------------------------------ */
 
 #[derive(Debug, Clone, Copy)]
-struct Bounds {
-    x: i32,
-    y: i32,
-    width: u32,
-    height: u32,
-    /// 保存时的缩放比：尺寸/坐标都是物理像素，还原成逻辑值要用它
-    scale: f64,
+pub struct Bounds {
+    pub x: i32,
+    pub y: i32,
+    pub width: u32,
+    pub height: u32,
+    pub scale: f64,
 }
 
-fn load_bounds(data_dir: &Path) -> Option<Bounds> {
+pub fn load_bounds(data_dir: &Path) -> Option<Bounds> {
     let raw = fs::read_to_string(data_dir.join("window-state.json")).ok()?;
     let v: Value = serde_json::from_str(&raw).ok()?;
     let num = |key: &str| v.get(key).and_then(|x| x.as_f64());
@@ -206,311 +214,35 @@ fn load_bounds(data_dir: &Path) -> Option<Bounds> {
     })
 }
 
-/// 上次的位置可能落在一块已经拔掉的副屏上；无边框窗口没有系统标题栏可拖，
-/// 落在可视区外就救不回来了，所以把坐标夹回最近的显示器。
-fn clamp_to_monitor(app: &AppHandle, b: Bounds) -> Bounds {
-    let monitors = match app.available_monitors() {
-        Ok(list) if !list.is_empty() => list,
-        _ => return b,
-    };
-    let cx = b.x as i64 + b.width as i64 / 2;
-    let cy = b.y as i64 + b.height as i64 / 2;
-    let mut best = monitors[0].clone();
-    let mut best_dist = i64::MAX;
-    for m in monitors {
-        let left = m.position().x as i64;
-        let top = m.position().y as i64;
-        let right = left + m.size().width as i64;
-        let bottom = top + m.size().height as i64;
-        let dx = if cx < left {
-            left - cx
-        } else if cx > right {
-            cx - right
-        } else {
-            0
-        };
-        let dy = if cy < top {
-            top - cy
-        } else if cy > bottom {
-            cy - bottom
-        } else {
-            0
-        };
-        let dist = dx * dx + dy * dy;
-        if dist < best_dist {
-            best_dist = dist;
-            best = m.clone();
-        }
-    }
-
-    let left = best.position().x as i64;
-    let top = best.position().y as i64;
-    let width = (b.width as i64).min(best.size().width as i64) as u32;
-    let height = (b.height as i64).min(best.size().height as i64) as u32;
-    let max_x = left + best.size().width as i64 - width as i64;
-    let max_y = top + best.size().height as i64 - height as i64;
-    Bounds {
-        x: (b.x as i64).clamp(left, max_x.max(left)) as i32,
-        y: (b.y as i64).clamp(top, max_y.max(top)) as i32,
-        width,
-        height,
-        scale: b.scale,
-    }
-}
-
-fn save_window_state(window: &tauri::Window, data_dir: &Path) {
-    // 最大化时拿到的是整屏尺寸，存下去下次就不是「上次的大小」了，宁可不写。
-    if window.is_maximized().unwrap_or(false) {
+pub fn save_bounds(data_dir: &Path, b: Bounds) {
+    if b.width < MIN_WIDTH || b.height < MIN_HEIGHT {
         return;
     }
-    let (Ok(pos), Ok(size), Ok(scale)) = (
-        window.outer_position(),
-        window.inner_size(),
-        window.scale_factor(),
-    ) else {
-        return;
-    };
     let value = json!({
-        "x": pos.x,
-        "y": pos.y,
-        "width": size.width,
-        "height": size.height,
-        "scale": scale,
+        "x": b.x,
+        "y": b.y,
+        "width": b.width,
+        "height": b.height,
+        "scale": b.scale,
     });
     let _ = fs::create_dir_all(data_dir);
     let _ = write_json_atomic(&data_dir.join("window-state.json"), &value);
 }
 
-/* ------------------------------------------------------------------ */
-/* 启动                                                                */
-/* ------------------------------------------------------------------ */
-
-pub fn boot(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
-    let data_dir = resolve_data_dir();
-    fs::create_dir_all(&data_dir)?;
-    if let Some(candidate) = exe_data_dir() {
-        migrate_data(&data_dir, &candidate);
+#[cfg(windows)]
+pub fn trim_working_set() {
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetCurrentProcess() -> isize;
+        fn SetProcessWorkingSetSize(process: isize, min: usize, max: usize) -> i32;
     }
-    std::env::set_var("KW_DATA_DIR", &data_dir);
-    // 桌面端不能靠「访问首页就发 Cookie」：本机任何进程扫到端口都能白拿会话。
-    // 令牌由下面注入的 init 脚本写进 WebView 自己的 Cookie，服务端只认它。
-    std::env::set_var("KW_NO_AUTO_COOKIE", "1");
-    std::env::set_var("KW_SCAN_CACHE_MS", "60000");
-
-    let desktop = Desktop::load(data_dir);
-
-    let options = kw_server::ServeOptions {
-        port: 0,
-        public_dir: public_dir(app),
-        version: env!("CARGO_PKG_VERSION").to_string(),
-    };
-    let server = tauri::async_runtime::block_on(kw_server::serve(options))?;
-    let script = desktop.init_script(&server.token);
-    let url = Url::parse(&format!("{}/", server.url()))?;
-    desktop.put_server(server);
-    let restore = load_bounds(&desktop.data_dir);
-    app.manage(desktop);
-
-    // 页面是我们自己起的本地服务，除它之外不许跳转，外链交给系统浏览器
-    let origin = url.origin().ascii_serialization();
-    let mut builder = WebviewWindowBuilder::new(app, "main", WebviewUrl::External(url))
-        .title("SSH Keywarden")
-        .decorations(false)
-        .visible(false)
-        .background_color(tauri::window::Color(0x0d, 0x11, 0x17, 255))
-        .initialization_script(script)
-        .on_navigation(move |target| target.origin().ascii_serialization() == origin)
-        .on_new_window(|target, _features| {
-            if matches!(target.scheme(), "http" | "https") {
-                let _ = tauri_plugin_opener::open_url(target.as_str(), None::<&str>);
-            }
-            NewWindowResponse::Deny
-        })
-        .on_page_load(|window, payload| {
-            if payload.event() == PageLoadEvent::Started {
-                let _ = window.show();
-            }
-        });
-
-    let (width, height) = match restore {
-        Some(b) => (b.width as f64 / b.scale, b.height as f64 / b.scale),
-        None => (DEFAULT_WIDTH as f64, DEFAULT_HEIGHT as f64),
-    };
-    builder = builder
-        .inner_size(width, height)
-        .min_inner_size(MIN_WIDTH as f64, MIN_HEIGHT as f64);
-
-    let window = builder.build()?;
-
-    if let Some(b) = restore {
-        let b = clamp_to_monitor(app.handle(), b);
-        let _ = window.set_position(PhysicalPosition::new(b.x, b.y));
-    }
-
-    Ok(())
-}
-
-/// 开发态读源码树里的 assets，装好之后读安装包 resources 里的 public。
-fn public_dir(app: &tauri::App) -> PathBuf {
-    if let Ok(dir) = app.path().resource_dir() {
-        let candidate = dir.join("public");
-        if candidate.join("index.html").is_file() {
-            return candidate;
-        }
-    }
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets/public")
-}
-
-pub fn on_window_event(window: &tauri::Window, event: &WindowEvent, data_dir: &Path) {
-    if matches!(event, WindowEvent::CloseRequested { .. }) {
-        save_window_state(window, data_dir);
+    unsafe {
+        let _ = SetProcessWorkingSetSize(GetCurrentProcess(), usize::MAX, usize::MAX);
     }
 }
 
-/* ------------------------------------------------------------------ */
-/* 命令                                                                */
-/* ------------------------------------------------------------------ */
-
-/// 弹原生选择框；`dir=true` 选目录，否则选文件。取消返回空串。
-async fn pick(app: AppHandle, opts: Option<Value>, dir: bool) -> Result<String, String> {
-    let default_title = if dir {
-        "选择目录"
-    } else {
-        "选择私钥文件"
-    };
-    let title = opts
-        .as_ref()
-        .and_then(|o| o.get("title"))
-        .and_then(|v| v.as_str())
-        .filter(|s| !s.is_empty())
-        .unwrap_or(default_title)
-        .to_string();
-    let start = opts
-        .as_ref()
-        .and_then(|o| o.get("start"))
-        .and_then(|v| v.as_str())
-        .unwrap_or_default()
-        .to_string();
-
-    let mut dialog = app.dialog().file().set_title(title);
-    if !start.is_empty() && Path::new(&start).exists() {
-        dialog = dialog.set_directory(start);
-    }
-    if let Some(window) = app.get_webview_window("main") {
-        dialog = dialog.set_parent(&window);
-    }
-
-    let (tx, rx) = tokio::sync::oneshot::channel();
-    if dir {
-        dialog.pick_folder(move |picked| {
-            let _ = tx.send(picked);
-        });
-    } else {
-        dialog.pick_file(move |picked| {
-            let _ = tx.send(picked);
-        });
-    }
-
-    let picked = rx.await.map_err(|_| "选择框没有返回结果".to_string())?;
-    Ok(picked
-        .and_then(|p| p.into_path().ok())
-        .map(|p| p.display().to_string())
-        .unwrap_or_default())
-}
-
-#[tauri::command]
-pub async fn pick_file(app: AppHandle, opts: Option<Value>) -> Result<String, String> {
-    pick(app, opts, false).await
-}
-
-#[tauri::command]
-pub async fn pick_dir(app: AppHandle, opts: Option<Value>) -> Result<String, String> {
-    pick(app, opts, true).await
-}
-
-#[tauri::command]
-pub fn open_data_dir(app: AppHandle, desktop: State<'_, Desktop>) -> Result<String, String> {
-    let dir = desktop.data_dir.clone();
-    fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    app.opener()
-        .open_path(dir.display().to_string(), None::<&str>)
-        .map_err(|e| e.to_string())?;
-    Ok(String::new())
-}
-
-#[tauri::command]
-pub fn is_maximized(window: WebviewWindow) -> Result<bool, String> {
-    window.is_maximized().map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-pub fn toggle_maximize(window: WebviewWindow) -> Result<bool, String> {
-    let maximized = window.is_maximized().map_err(|e| e.to_string())?;
-    if maximized {
-        window.unmaximize().map_err(|e| e.to_string())?;
-    } else {
-        window.maximize().map_err(|e| e.to_string())?;
-    }
-    Ok(!maximized)
-}
-
-#[tauri::command]
-pub fn read_clipboard(app: AppHandle) -> Result<String, String> {
-    app.clipboard().read_text().map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-pub fn write_clipboard(app: AppHandle, text: String) -> Result<(), String> {
-    app.clipboard().write_text(text).map_err(|e| e.to_string())
-}
-
-/// 前端 `theme.js` 直接把它交给 `setSystemDark(dark)` 并做 `dark === systemDark` 比较，
-/// 必须是布尔值；返回 `"light"` 这种字符串会被 `Boolean()` 当成 true，浅色系统永远判成深色。
-#[tauri::command]
-pub fn system_theme(window: WebviewWindow) -> Result<bool, String> {
-    let theme = window.theme().map_err(|e| e.to_string())?;
-    Ok(matches!(theme, tauri::Theme::Dark))
-}
-
-#[tauri::command]
-pub fn theme_set(desktop: State<'_, Desktop>, choice: String) -> Result<String, String> {
-    if !THEMES.contains(&choice.as_str()) {
-        return Err("未知主题".into());
-    }
-    if let Ok(mut slot) = desktop.theme.write() {
-        *slot = choice.clone();
-    }
-    write_json_atomic(
-        &desktop.data_dir.join("theme.json"),
-        &json!({ "choice": choice }),
-    )
-    .map_err(|e| format!("无法保存主题：{e}"))?;
-    Ok(choice)
-}
-
-#[tauri::command]
-pub fn ui_set(desktop: State<'_, Desktop>, patch: Value) -> Result<Value, String> {
-    let mut next = desktop.ui();
-    let Some(patch) = patch.as_object() else {
-        return Ok(next);
-    };
-    if let Some(mode) = patch.get("mode").and_then(|v| v.as_str()) {
-        if mode == "keys" || mode == "term" {
-            next["mode"] = Value::String(mode.to_string());
-        }
-    }
-    if let Some(h) = patch.get("termHeight").and_then(|v| v.as_f64()) {
-        if h == 0.0 || (180.0..=10_000.0).contains(&h) {
-            next["termHeight"] = json!(h.round() as i64);
-        }
-    }
-    if let Ok(mut slot) = desktop.ui.write() {
-        *slot = next.clone();
-    }
-    write_json_atomic(&desktop.data_dir.join("ui.json"), &next)
-        .map_err(|_| "无法保存视图设置".to_string())?;
-    Ok(next)
-}
+#[cfg(not(windows))]
+pub fn trim_working_set() {}
 
 #[cfg(test)]
 mod tests {
@@ -527,8 +259,6 @@ mod tests {
             "tauri.conf.json 的 version 与 Cargo.toml 不一致"
         );
 
-        // Cargo 的 semver 只能把「当天第几次」放在 prerelease 位（2026.10.30-1），
-        // CHANGELOG 的标题统一写成 v2026.10.30.1，这里做一次映射
         let display = format!("v{}", version.replace('-', "."));
         let changelog = include_str!("../../../CHANGELOG.md");
         assert!(
@@ -571,7 +301,6 @@ mod tests {
             json!({ "mode": "term", "termHeight": 420 })
         );
 
-        // 低于下限的高度当没设；未知模式退回密钥视图
         write_json_atomic(
             &dir.path().join("ui.json"),
             &json!({ "mode": "whatever", "termHeight": 12 }),
@@ -598,7 +327,6 @@ mod tests {
         assert!(dst.path().join("key-notes.json").is_file());
         assert!(!dst.path().join("unrelated.txt").exists());
 
-        // 目标已有 config.json 就不再覆盖（用户新数据优先）
         fs::write(src.path().join("config.json"), "{\"from\":\"old\"}").unwrap();
         migrate_data(dst.path(), src.path());
         assert_eq!(
@@ -621,7 +349,6 @@ mod tests {
         assert_eq!((b.x, b.y, b.width, b.height), (10, 20, 1600, 900));
         assert_eq!(b.scale, 1.5);
 
-        // 比最小尺寸还小的记录直接忽略，走默认大小
         write_json_atomic(
             &dir.path().join("window-state.json"),
             &json!({ "x": 0, "y": 0, "width": 400, "height": 300 }),

@@ -16,7 +16,7 @@ async function doConnect(hostId, extra = {}) {
   btn.disabled = true;
   label.textContent = '连接中…';
   $('hostSelect').disabled = true;
-  document.querySelectorAll('#modeSwitch button').forEach((b) => (b.disabled = true));
+  document.querySelectorAll('[data-mode]').forEach((b) => (b.disabled = true));
   logLine(`正在连接 ${hostId ? (state.hosts.find((h) => h.id === hostId) || {}).name || hostId : '主机'}…`, 'info');
 
   const withKeys = state.mode !== 'term';
@@ -55,7 +55,7 @@ async function doConnect(hostId, extra = {}) {
     btn.disabled = false;
     label.textContent = '连接';
     $('hostSelect').disabled = false;
-    document.querySelectorAll('#modeSwitch button').forEach((b) => (b.disabled = false));
+    document.querySelectorAll('[data-mode]').forEach((b) => (b.disabled = false));
   }
 }
 

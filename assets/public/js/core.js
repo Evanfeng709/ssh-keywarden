@@ -76,8 +76,15 @@ export function logLine(msg, type = 'info') {
   const t = new Date().toLocaleTimeString('zh-CN', { hour12: false });
   el.innerHTML = `<span class="t">${t}</span><span class="m">${escapeHtml(msg)}</span>`;
   const body = $('log');
-  body.appendChild(el);
-  body.scrollTop = body.scrollHeight;
+  if (body) {
+    body.appendChild(el);
+    body.scrollTop = body.scrollHeight;
+  }
+  const latest = $('logLatest');
+  if (latest) {
+    latest.textContent = `${t}  ${msg}`;
+    latest.className = `log-latest ${type}`;
+  }
 }
 
 export function fmtBytes(n) {
@@ -142,11 +149,11 @@ export function stripPubSuffix(p) {
 let modalStack = [];
 const closeHooks = new WeakMap();
 
-export function openModal({ title, bodyHtml, footHtml, onMount, onClose, width }) {
+export function openModal({ title, bodyHtml, footHtml, onMount, onClose, width, drawer = true }) {
   const mask = document.createElement('div');
-  mask.className = 'modal-mask';
+  mask.className = `modal-mask${drawer ? ' is-drawer' : ''}`;
   mask.innerHTML = `
-    <div class="modal" ${width ? `style="width:${width}"` : ''}>
+    <div class="modal${drawer ? ' modal-drawer' : ''}" ${width ? `style="width:${width}"` : ''}>
       <div class="modal-head">
         <span>${escapeHtml(title)}</span>
         <button class="close-x" data-close>×</button>
@@ -204,6 +211,7 @@ export function confirmModal({
     openModal({
       title,
       width: '520px',
+      drawer: false,
       bodyHtml: `<div class="confirm-msg">${escapeHtml(message)}</div>`,
       footHtml:
         `<button type="button" data-confirm-cancel>${escapeHtml(cancelText)}</button>` +

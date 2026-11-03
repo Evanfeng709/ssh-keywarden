@@ -6,16 +6,21 @@ license.workspace = true
 authors.workspace = true
 
 [build-dependencies]
-tauri-build = { version = "2", features = [] }
+tauri-winres = "0.3"
 
 [dependencies]
+kw-core = { path = "../kw-core" }
+kw-keys = { path = "../kw-keys" }
+kw-ssh = { path = "../kw-ssh" }
 kw-server = { path = "../kw-server" }
 kw-store = { path = "../kw-store" }
-tauri = { version = "2", features = [] }
-tauri-plugin-clipboard-manager = "2"
-tauri-plugin-dialog = "2"
-tauri-plugin-opener = "2"
-tauri-plugin-single-instance = "2"
+kw-ffi = { path = "../kw-ffi" }
+eframe = { version = "0.31", default-features = false, features = ["glow", "default_fonts"] }
+arboard = "3.7"
+rfd = "0.17"
+open = "5"
+image = { version = "0.25", default-features = false, features = ["png", "ico"] }
+base64 = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }

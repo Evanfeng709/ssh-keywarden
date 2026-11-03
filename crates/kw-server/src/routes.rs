@@ -477,10 +477,6 @@ async fn ws_terminal(
     ws.on_upgrade(move |socket| handle_terminal(socket, state, sid, cols, rows))
 }
 
-fn b64(bytes: &[u8]) -> String {
-    base64::engine::general_purpose::STANDARD.encode(bytes)
-}
-
 async fn handle_terminal(
     socket: WebSocket,
     state: Arc<AppState>,
@@ -529,19 +525,25 @@ async fn handle_terminal(
     let (mut sink, mut stream) = socket.split();
     let host_label = session.target.read().await.host.clone();
 
-    // 输出方向：PTY → WebSocket。统一 base64，避免多字节 UTF-8 被分帧切坏。
+    // 输出方向：PTY → WebSocket。直接发二进制帧，省去 Base64 膨胀与 JSON 分配。
     let out = tokio::spawn(async move {
         loop {
             match read_half.wait().await {
                 Some(ChannelMsg::Data { data }) => {
-                    let msg = json!({ "t": "out", "d": b64(&data) }).to_string();
-                    if sink.send(Message::Text(msg.into())).await.is_err() {
+                    if sink
+                        .send(Message::Binary(data.to_vec().into()))
+                        .await
+                        .is_err()
+                    {
                         break;
                     }
                 }
                 Some(ChannelMsg::ExtendedData { data, ext }) if ext == 1 => {
-                    let msg = json!({ "t": "out", "d": b64(&data) }).to_string();
-                    if sink.send(Message::Text(msg.into())).await.is_err() {
+                    if sink
+                        .send(Message::Binary(data.to_vec().into()))
+                        .await
+                        .is_err()
+                    {
                         break;
                     }
                 }
@@ -558,26 +560,35 @@ async fn handle_terminal(
         let _ = sink.close().await;
     });
 
-    // 输入方向：WebSocket → PTY
+    // 输入方向：WebSocket → PTY（支持二进制原始字节帧与 JSON 控制帧）
     while let Some(Ok(msg)) = stream.next().await {
-        let Message::Text(text) = msg else { continue };
-        let Ok(value) = serde_json::from_str::<Value>(&text) else {
-            continue;
-        };
-        session.touch();
-        match value.get("t").and_then(|v| v.as_str()) {
-            Some("in") => {
-                if let Some(data) = value.get("d").and_then(|v| v.as_str()) {
-                    if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(data) {
-                        let _ = write_half.data_bytes(bytes).await;
-                    }
-                }
+        match msg {
+            Message::Binary(bytes) => {
+                session.touch();
+                let _ = write_half.data_bytes(bytes.to_vec()).await;
             }
-            Some("resize") => {
-                let cols = value.get("cols").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
-                let rows = value.get("rows").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
-                if cols > 0 && rows > 0 {
-                    let _ = write_half.window_change(cols, rows, 0, 0).await;
+            Message::Text(text) => {
+                let Ok(value) = serde_json::from_str::<Value>(&text) else {
+                    continue;
+                };
+                session.touch();
+                match value.get("t").and_then(|v| v.as_str()) {
+                    Some("in") => {
+                        if let Some(data) = value.get("d").and_then(|v| v.as_str()) {
+                            if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(data)
+                            {
+                                let _ = write_half.data_bytes(bytes).await;
+                            }
+                        }
+                    }
+                    Some("resize") => {
+                        let cols = value.get("cols").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+                        let rows = value.get("rows").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+                        if cols > 0 && rows > 0 {
+                            let _ = write_half.window_change(cols, rows, 0, 0).await;
+                        }
+                    }
+                    _ => {}
                 }
             }
             _ => {}
@@ -688,11 +699,16 @@ async fn static_or_404(
         return (StatusCode::NOT_FOUND, "Not found").into_response();
     };
 
+    let cache_ctl = if path.starts_with("/vendor/") {
+        "private, max-age=3600"
+    } else {
+        "no-store"
+    };
     let mut res = (
         StatusCode::OK,
         [
             (header::CONTENT_TYPE, mime_of(&path)),
-            (header::CACHE_CONTROL, "no-store"),
+            (header::CACHE_CONTROL, cache_ctl),
             (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
         ],
         bytes,

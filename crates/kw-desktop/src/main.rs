@@ -1,53 +1,70 @@
 // 桌面版不带控制台窗口；调试时想看日志就用 `cargo run` 的 debug 构建
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod app;
 mod desktop;
+mod icons;
+mod theme;
+mod vt;
 
-use desktop::Desktop;
-use tauri::Manager;
+use std::sync::Arc;
+use eframe::egui;
 
-fn main() {
-    tauri::Builder::default()
-        // 单实例插件必须第一个注册：第二次启动只把已有窗口拉到前面
-        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
-            if let Some(window) = app.get_webview_window("main") {
-                let _ = window.unminimize();
-                let _ = window.show();
-                let _ = window.set_focus();
-            }
-        }))
-        .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_clipboard_manager::init())
-        .plugin(tauri_plugin_opener::init())
-        .invoke_handler(tauri::generate_handler![
-            desktop::pick_file,
-            desktop::pick_dir,
-            desktop::open_data_dir,
-            desktop::toggle_maximize,
-            desktop::is_maximized,
-            desktop::read_clipboard,
-            desktop::write_clipboard,
-            desktop::system_theme,
-            desktop::theme_set,
-            desktop::ui_set,
-        ])
-        .setup(|app| desktop::boot(app))
-        .on_window_event(|window, event| {
-            let Some(desktop) = window.try_state::<Desktop>() else {
-                return;
-            };
-            desktop::on_window_event(window, event, &desktop.data_dir);
-        })
-        .build(tauri::generate_context!())
-        .expect("无法初始化应用窗口")
-        .run(|app, event| {
-            if matches!(event, tauri::RunEvent::Exit) {
-                let Some(desktop) = app.try_state::<Desktop>() else {
-                    return;
-                };
-                if let Some(server) = desktop.take_server() {
-                    tauri::async_runtime::block_on(server.shutdown());
-                }
-            }
-        });
+fn load_app_icon() -> Option<Arc<egui::IconData>> {
+    let bytes = include_bytes!("../icons/icon.png");
+    let img = image::load_from_memory(bytes).ok()?.into_rgba8();
+    let (width, height) = img.dimensions();
+    Some(Arc::new(egui::IconData {
+        rgba: img.into_raw(),
+        width,
+        height,
+    }))
+}
+
+fn main() -> eframe::Result<()> {
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .thread_stack_size(1024 * 1024)
+        .enable_all()
+        .build()
+        .expect("无法创建异步运行时");
+    let handle = rt.handle().clone();
+
+    let data_dir = desktop::resolve_data_dir();
+    let _ = std::fs::create_dir_all(&data_dir);
+    if let Some(cand) = desktop::exe_data_dir() {
+        desktop::migrate_data(&data_dir, &cand);
+    }
+
+    let mut viewport = egui::ViewportBuilder::default()
+        .with_title("SSH Keywarden")
+        .with_decorations(false)
+        .with_inner_size([1240.0, 800.0])
+        .with_min_inner_size([920.0, 600.0]);
+
+    if let Some(icon) = load_app_icon() {
+        viewport = viewport.with_icon(icon);
+    }
+
+    if let Some(b) = desktop::load_bounds(&data_dir) {
+        let scale = if b.scale > 0.25 { b.scale as f32 } else { 1.0 };
+        let w = (b.width as f32 / scale).clamp(920.0, 3840.0);
+        let h = (b.height as f32 / scale).clamp(600.0, 2160.0);
+        let x = (b.x as f32 / scale).clamp(-1000.0, 3800.0);
+        let y = (b.y as f32 / scale).clamp(0.0, 2000.0);
+        viewport = viewport
+            .with_inner_size([w, h])
+            .with_position(egui::pos2(x, y));
+    }
+
+    let options = eframe::NativeOptions {
+        viewport,
+        ..Default::default()
+    };
+
+    eframe::run_native(
+        "SSH Keywarden",
+        options,
+        Box::new(move |cc| Ok(Box::new(app::KwDesktopApp::new(cc, handle, data_dir)))),
+    )
 }

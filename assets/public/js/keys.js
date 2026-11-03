@@ -298,6 +298,16 @@ function setConnected(connected) {
   // 比灰着让人以为坏了要好
   $('btnTerm').classList.toggle('dim', !connected);
   $('btnTerm').title = connected ? '打开 SSH 终端' : '先连接服务器才能开终端';
+
+  const sbDot = $('statusBarDot');
+  const sbConn = $('statusBarConn');
+  if (sbDot && sbConn) {
+    sbDot.className = `log-dot ${connected ? 'ok' : ''}`;
+    sbConn.textContent =
+      connected && state.session
+        ? `${state.session.host.username}@${state.session.host.host}`
+        : '未连接';
+  }
 }
 
 // 表头文字左对齐，不能以整列中心作为拖动条的锚点。
@@ -681,9 +691,15 @@ function renderServer() {
 
     const tr = document.createElement('tr');
     if (checked) tr.classList.add('selected');
+    const rawType = String(item.type || '未知');
+    const algoCls = rawType.toLowerCase().includes('ed25519')
+      ? ' algo-ed25519'
+      : rawType.toLowerCase().includes('rsa')
+        ? ' algo-rsa'
+        : '';
     tr.innerHTML = `
       <td class="col-check"><input type="checkbox" data-fp="${escapeHtml(item.fingerprint)}" ${checked ? 'checked' : ''} /></td>
-      <td class="col-type"><span class="badge">${escapeHtml(item.type || '未知')}</span></td>
+      <td class="col-type"><span class="badge${algoCls}">${escapeHtml(rawType)}</span></td>
       <td>
         <div class="fp" data-copy="${escapeHtml(item.fingerprint)}" title="点击复制完整指纹">${escapeHtml(item.fingerprint || '—')}</div>
       </td>

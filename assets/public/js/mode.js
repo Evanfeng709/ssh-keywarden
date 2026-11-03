@@ -21,9 +21,15 @@ function readMode() {
 function setMode(mode, { persist = true } = {}) {
   state.mode = mode;
   document.body.classList.toggle('mode-term', mode === 'term');
-  for (const btn of document.querySelectorAll('#modeSwitch button')) {
-    btn.classList.toggle('on', btn.dataset.mode === mode);
-    btn.setAttribute('aria-pressed', String(btn.dataset.mode === mode));
+  for (const btn of document.querySelectorAll('[data-mode]')) {
+    const isTarget = btn.dataset.mode === mode;
+    btn.classList.toggle('on', isTarget);
+    btn.classList.toggle('active', isTarget);
+    btn.setAttribute('aria-pressed', String(isTarget));
+  }
+  for (const nav of document.querySelectorAll('#sidebar .nav-item[data-nav]')) {
+    if (nav.dataset.nav === 'hosts') nav.classList.toggle('active', mode === 'keys');
+    if (nav.dataset.nav === 'term') nav.classList.toggle('active', mode === 'term');
   }
   // 只改标题文字本身：h2 里还挂着登录方式徽章的槽位，整体 textContent 会把它冲掉
   $('serverPanelTitle').textContent = mode === 'term' ? 'SSH 终端' : '服务器密钥';
@@ -59,7 +65,7 @@ async function switchMode(next) {
   const session = state.session;
   if (next === 'keys' && session && session.keysLoaded === false) {
     switching = true;
-    const buttons = document.querySelectorAll('#modeSwitch button');
+    const buttons = document.querySelectorAll('[data-mode]');
     buttons.forEach((b) => (b.disabled = true));
     try {
       const data = await api('/api/refresh', { method: 'POST', body: { sid: session.sid } });
@@ -80,7 +86,7 @@ async function switchMode(next) {
 }
 
 export function initMode() {
-  for (const btn of document.querySelectorAll('#modeSwitch button')) {
+  for (const btn of document.querySelectorAll('[data-mode]')) {
     btn.addEventListener('click', () => switchMode(btn.dataset.mode));
   }
   setMode(readMode(), { persist: false });

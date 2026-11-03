@@ -8,6 +8,97 @@ import { THEME_CHOICES, currentChoice, applyTheme } from './theme.js';
 /* 主机                                                                */
 /* ------------------------------------------------------------------ */
 
+let vaultQuery = '';
+let vaultSearchBound = false;
+
+function leafName(p) {
+  const parts = String(p || '').split(/[\\/]/).filter(Boolean);
+  return parts.length ? parts[parts.length - 1] : '';
+}
+
+function renderVaultGrids() {
+  const grids = [$('hostVaultGrid'), $('termVaultGrid')].filter(Boolean);
+  if (!grids.length) return;
+
+  const searchInput = $('vaultSearch');
+  if (searchInput && !vaultSearchBound) {
+    vaultSearchBound = true;
+    searchInput.addEventListener('input', () => {
+      vaultQuery = searchInput.value.trim().toLowerCase();
+      renderVaultGrids();
+    });
+  }
+  if (searchInput) {
+    searchInput.parentElement.classList.toggle('hidden', state.hosts.length < 2);
+  }
+
+  const filtered = state.hosts.filter((h) => {
+    if (!vaultQuery) return true;
+    return [h.name, h.host, h.username, String(h.port || 22), h.identityFile]
+      .filter(Boolean)
+      .join(' ')
+      .toLowerCase()
+      .includes(vaultQuery);
+  });
+
+  const cardsHtml = filtered
+    .map((h) => {
+      const title = h.name || h.host;
+      const endpoint = `${h.username}@${h.host}:${h.port || 22}`;
+      const keyLeaf = leafName(h.identityFile);
+      const authBadge = keyLeaf
+        ? `<span class="vc-auth key" title="${escapeHtml(h.identityFile)}">🗝️ ${escapeHtml(keyLeaf)}</span>`
+        : `<span class="vc-auth pwd">🔒 密码认证</span>`;
+      const initial = (title.trim()[0] || 'S').toUpperCase();
+      return `
+        <div class="vault-card" data-host-id="${escapeHtml(h.id)}" title="双击直连 ${escapeHtml(title)}">
+          <div class="vc-top">
+            <div class="vc-avatar">${escapeHtml(initial)}</div>
+            <div class="vc-info">
+              <div class="vc-name">${escapeHtml(title)}</div>
+              <div class="vc-endpoint">${escapeHtml(endpoint)}</div>
+            </div>
+            <button type="button" class="vc-edit" data-vault-edit="${escapeHtml(h.id)}" title="编辑主机配置">✎</button>
+          </div>
+          <div class="vc-foot">
+            ${authBadge}
+            <div class="vc-actions">
+              <button type="button" class="vc-btn primary" data-vault-connect="keys" data-id="${escapeHtml(h.id)}" title="连接并管理服务器密钥">🛡️ 密钥</button>
+              <button type="button" class="vc-btn" data-vault-connect="term" data-id="${escapeHtml(h.id)}" title="直连打开 SSH 终端">&gt;_ 终端</button>
+            </div>
+          </div>
+        </div>`;
+    })
+    .join('');
+
+  const addCardHtml = `
+    <button type="button" class="vault-card vault-card-add" data-vault-add>
+      <div class="vc-add-icon">＋</div>
+      <div class="vc-add-label">添加服务器</div>
+      <div class="vc-add-sub">配置 SSH 主机地址与登录密钥</div>
+    </button>
+    ${
+      !state.hosts.length
+        ? `<button type="button" class="vault-card vault-card-add" data-vault-sync>
+            <div class="vc-add-icon">☁️</div>
+            <div class="vc-add-label">从微软云端同步</div>
+            <div class="vc-add-sub">拉取已备份的主机列表与钥匙备注</div>
+          </button>`
+        : ''
+    }`;
+
+  const hostGrid = $('hostVaultGrid');
+  if (hostGrid) {
+    hostGrid.innerHTML = cardsHtml + addCardHtml;
+  }
+  const termGrid = $('termVaultGrid');
+  if (termGrid) {
+    termGrid.innerHTML =
+      cardsHtml ||
+      `<div class="meta" style="padding:12px 4px">暂无主机配置，请先在「主机与密钥」或左侧「添加主机」中创建服务器。</div>`;
+  }
+}
+
 function renderHosts() {
   const sel = $('hostSelect');
   const prev = sel.value;
@@ -18,6 +109,7 @@ function renderHosts() {
     opt.value = '';
     opt.textContent = '（还没有主机，点「管理主机」添加）';
     sel.appendChild(opt);
+    renderVaultGrids();
     return;
   }
 
@@ -28,6 +120,7 @@ function renderHosts() {
     sel.appendChild(opt);
   }
   if (prev && state.hosts.some((h) => h.id === prev)) sel.value = prev;
+  renderVaultGrids();
 }
 
 function openHostModal(hostId) {

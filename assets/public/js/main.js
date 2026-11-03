@@ -37,6 +37,8 @@ function setLocalPanel(open) {
   $('layout').classList.toggle('local-open', open);
   $('btnLocal').setAttribute('aria-pressed', String(open));
   $('btnLocal').title = open ? '收起本地密钥库' : '显示本地密钥库';
+  const navLocal = document.querySelector('#sidebar .nav-item[data-nav="local"]');
+  if (navLocal) navLocal.classList.toggle('active', open);
   if (open) renderLocal();
   // 主区域变窄，终端列数要跟着重排
   requestAnimationFrame(() => {
@@ -164,7 +166,97 @@ function bind() {
   // （原来逐行 dispatchEvent('change')，N 把钥匙会各跑一次 updateSelectionUi）
   $('checkAll').addEventListener('change', (e) => setAllSelected(e.target.checked));
 
-  $('btnClearLog').addEventListener('click', () => ($('log').innerHTML = ''));
+  $('btnClearLog').addEventListener('click', (e) => {
+    e.stopPropagation();
+    $('log').innerHTML = '';
+    const latest = $('logLatest');
+    if (latest) {
+      latest.textContent = '日志已清空';
+      latest.className = 'log-latest';
+    }
+  });
+
+  // 底部 Termius 状态栏点击展开/收起详细日志抽屉
+  const logToggle = $('logToggle');
+  if (logToggle) {
+    logToggle.addEventListener('click', (e) => {
+      if (e.target.closest('#btnClearLog')) return;
+      const bar = $('logbar');
+      const open = bar.classList.toggle('log-open');
+      const btn = $('btnToggleLog');
+      if (btn) {
+        btn.setAttribute('aria-expanded', String(open));
+        btn.textContent = open ? '日志 ▾' : '日志 ▴';
+      }
+      requestAnimationFrame(() => {
+        alignSplitter();
+        const ctl = getTermCtl();
+        if (ctl) {
+          ctl.fit.fit();
+          ctl.sendResize();
+        }
+      });
+    });
+  }
+
+  // 左侧 Termius 导航栏
+  const sidebar = $('sidebar');
+  if (sidebar) {
+    sidebar.addEventListener('click', (e) => {
+      const btn = e.target.closest('.nav-item[data-nav]');
+      if (!btn) return;
+      const nav = btn.dataset.nav;
+      if (nav === 'hosts' || nav === 'term') {
+        // 已由 initMode() 绑定 [data-mode] 点击切换
+      } else if (nav === 'local') {
+        setLocalPanel(!$('layout').classList.contains('local-open'));
+      } else if (nav === 'new-host') {
+        openHostModal(null);
+      } else if (nav === 'sync') {
+        $('btnSync').click();
+      } else if (nav === 'settings') {
+        openSettingsModal();
+      }
+    });
+  }
+
+  // 主机库卡片矩阵（Vault Grid）直连与编辑
+  $('layout').addEventListener('click', (e) => {
+    const connBtn = e.target.closest('[data-vault-connect]');
+    if (connBtn) {
+      const id = connBtn.dataset.id;
+      const targetMode = connBtn.dataset.vaultConnect;
+      if (id) {
+        $('hostSelect').value = id;
+        const m = document.querySelector(`[data-mode="${targetMode}"]`);
+        if (m && state.mode !== targetMode) m.click();
+        doConnect(id);
+      }
+      return;
+    }
+    const editBtn = e.target.closest('[data-vault-edit]');
+    if (editBtn) {
+      openHostModal(editBtn.dataset.vaultEdit);
+      return;
+    }
+    if (e.target.closest('[data-vault-add]')) {
+      openHostModal(null);
+      return;
+    }
+    if (e.target.closest('[data-vault-sync]')) {
+      $('btnSync').click();
+    }
+  });
+
+  $('layout').addEventListener('dblclick', (e) => {
+    const card = e.target.closest('.vault-card[data-host-id]');
+    if (!card || e.target.closest('button')) return;
+    const id = card.dataset.hostId;
+    if (id) {
+      $('hostSelect').value = id;
+      doConnect(id);
+    }
+  });
 
   // 主机下拉里双击 = 快速编辑
   $('hostSelect').addEventListener('dblclick', () => openHostModal($('hostSelect').value));

@@ -12,6 +12,40 @@ let termCtl = null;
 let pendingTerminal = false;
 let clipboardBound = false;
 let themeBound = false;
+let xtermLoadPromise = null;
+
+function loadScriptOnce(src) {
+  return new Promise((resolve, reject) => {
+    const existing = document.querySelector(`script[src="${src}"]`);
+    if (existing && existing.dataset.loaded === '1') {
+      resolve();
+      return;
+    }
+    const s = document.createElement('script');
+    s.src = src;
+    s.async = false;
+    s.onload = () => {
+      s.dataset.loaded = '1';
+      resolve();
+    };
+    s.onerror = () => reject(new Error(`加载 ${src} 失败`));
+    document.head.appendChild(s);
+  });
+}
+
+/** 按需加载 xterm 与 fit 插件：未打开终端前不占用 V8 解析与堆内存 */
+function ensureXtermLoaded() {
+  if (window.Terminal && window.FitAddon) return Promise.resolve();
+  if (!xtermLoadPromise) {
+    xtermLoadPromise = loadScriptOnce('/vendor/xterm.js')
+      .then(() => loadScriptOnce('/vendor/addon-fit.js'))
+      .catch((err) => {
+        xtermLoadPromise = null;
+        throw err;
+      });
+  }
+  return xtermLoadPromise;
+}
 
 /* readClipboardText / writeClipboardText 已下沉到 core.js —— 桌面版走主进程 IPC、
    网页版退回 navigator.clipboard 的那套逻辑，全站只留一份。 */
@@ -66,6 +100,19 @@ function bindClipboardUi() {
   $('termPaste').addEventListener('click', () => {
     if (termCtl) pasteIntoTerminal(termCtl.term);
   });
+
+  const snippets = $('termSnippets');
+  if (snippets) {
+    snippets.addEventListener('click', (e) => {
+      const btn = e.target.closest('.snip-btn');
+      if (!btn || !termCtl) return;
+      const cmd = btn.dataset.cmd;
+      if (cmd && termCtl.ws && termCtl.ws.readyState === 1) {
+        termCtl.ws.send(new TextEncoder().encode(cmd));
+        termCtl.term.focus();
+      }
+    });
+  }
 }
 
 const TERM_HEIGHT_KEY = 'kw.termHeight';
@@ -177,7 +224,7 @@ function setTermStatus(text, kind = '') {
   }
 }
 
-function openTerminal() {
+async function openTerminal() {
   // 没连接就先连上，连完再自动打开（doConnect 成功后会回调进来）
   if (!state.session) {
     const hostId = $('hostSelect').value;
@@ -200,10 +247,16 @@ function openTerminal() {
     });
     return;
   }
-  if (!window.Terminal || !window.FitAddon) {
+
+  setTermStatus('加载组件…', 'warn');
+  try {
+    await ensureXtermLoaded();
+  } catch {
     toast('终端组件未加载（public/vendor 下的 xterm 文件缺失）', 'err', 6000);
+    setTermStatus('加载失败', 'err');
     return;
   }
+  if (!state.session || termCtl) return;
 
   setTermStatus('连接中…', 'warn');
   bindClipboardUi();
@@ -212,9 +265,9 @@ function openTerminal() {
     cursorBlink: true,
     cursorStyle: 'bar',
     fontSize: 13,
-    lineHeight: 1.2,
-    fontFamily: '"Cascadia Mono", Consolas, "Courier New", monospace',
-    scrollback: 8000,
+    lineHeight: 1.25,
+    fontFamily: '"JetBrains Mono", "Cascadia Mono", Consolas, "Courier New", monospace',
+    scrollback: 2500,
     theme: termPalette(resolvedTheme()),
   });
   const fit = new window.FitAddon.FitAddon();
@@ -246,6 +299,7 @@ function openTerminal() {
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
   const qs = `sid=${encodeURIComponent(state.session.sid)}&cols=${term.cols}&rows=${term.rows}`;
   const ws = new WebSocket(`${proto}://${location.host}/api/terminal?${qs}`);
+  ws.binaryType = 'arraybuffer';
 
   const sendResize = () => {
     if (ws.readyState === 1) ws.send(JSON.stringify({ t: 'resize', cols: term.cols, rows: term.rows }));
@@ -258,6 +312,10 @@ function openTerminal() {
   };
 
   ws.onmessage = (ev) => {
+    if (ev.data instanceof ArrayBuffer) {
+      term.write(new Uint8Array(ev.data));
+      return;
+    }
     let msg;
     try {
       msg = JSON.parse(ev.data);
@@ -282,9 +340,10 @@ function openTerminal() {
 
   ws.onerror = () => setTermStatus('连接错误', 'err');
 
+  const encoder = new TextEncoder();
   term.onData((d) => {
     if (ws.readyState === 1) {
-      ws.send(JSON.stringify({ t: 'in', d: bytesToB64(new TextEncoder().encode(d)) }));
+      ws.send(encoder.encode(d));
     }
   });
 

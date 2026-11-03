@@ -90,6 +90,43 @@ async fn commit(
     Ok(out.readback)
 }
 
+/// 生成密钥的私钥文件名前缀：前端传了 label 就用它，否则退回主机名/地址。
+fn generated_key_label(body: &Value, target_name: &str, target_host: &str) -> String {
+    body_str(body, "label")
+        .map(str::to_string)
+        .unwrap_or_else(|| {
+            if target_name.is_empty() {
+                target_host.to_string()
+            } else {
+                target_name.to_string()
+            }
+        })
+}
+
+/// 新公钥注释默认值：`用户名@服务器名-日期`；同一天同主机已有同名注释时追加 -2、-3。
+pub fn default_key_comment(
+    username: &str,
+    server_name: &str,
+    date: &str,
+    existing: &[String],
+) -> String {
+    unique_key_comment(&format!("{username}@{server_name}-{date}"), existing)
+}
+
+pub fn unique_key_comment(base: &str, existing: &[String]) -> String {
+    if !existing.iter().any(|c| c == base) {
+        return base.to_string();
+    }
+    let mut n = 2;
+    loop {
+        let candidate = format!("{base}-{n}");
+        if !existing.iter().any(|c| c == &candidate) {
+            return candidate;
+        }
+        n += 1;
+    }
+}
+
 fn save_key_pair(dir: &Path, gen: &GeneratedKey, label: &str) -> Result<PathBuf, ApiError> {
     fs::create_dir_all(dir)
         .map_err(|e| ApiError::bad(format!("创建目录失败：{}（{e}）", dir.display())))?;
@@ -141,6 +178,7 @@ async fn resolve_new_key(
     state: &AppState,
     session: &Arc<Session>,
     body: &Value,
+    existing_comments: &[String],
 ) -> Result<FreshKey, ApiError> {
     let mode = body.get("mode").and_then(Value::as_str).unwrap_or("");
     let passphrase = body
@@ -154,29 +192,46 @@ async fn resolve_new_key(
                 .get("generator")
                 .and_then(Value::as_str)
                 .unwrap_or("ed25519");
-            let comment = body_str(body, "comment");
+
+            let (label, server_name, username, login_dir) = {
+                let target = session.target.read().await;
+                let server_name = if target.name.is_empty() {
+                    target.host.clone()
+                } else {
+                    target.name.clone()
+                };
+                let login_dir = Path::new(target.identity_file.trim())
+                    .parent()
+                    .map(|p| p.display().to_string())
+                    .filter(|p| !p.is_empty());
+                (
+                    generated_key_label(body, &target.name, &target.host),
+                    server_name,
+                    target.username.clone(),
+                    login_dir,
+                )
+            };
+
+            let date: String = shanghai_stamp(SystemTime::now()).chars().take(8).collect();
+            let base_comment = body_str(body, "comment")
+                .map(str::to_string)
+                .unwrap_or_else(|| format!("{username}@{server_name}-{date}"));
+            let comment = unique_key_comment(&base_comment, existing_comments);
             let gen = if generator == "rsa" {
-                generate_rsa(comment, 3072, passphrase)
+                generate_rsa(Some(&comment), 3072, passphrase)
             } else {
-                generate_ed25519(comment, passphrase)
+                generate_ed25519(Some(&comment), passphrase)
             }
             .map_err(|e| ApiError::bad(format!("生成密钥失败：{e}")))?;
 
             let settings = state.current_settings();
             let dir = body_str(body, "saveDir")
                 .map(str::to_string)
+                .or(login_dir)
                 .or_else(|| Some(settings.save_dir).filter(|s| !s.is_empty()))
                 .or_else(|| Some(settings.local_key_dir).filter(|s| !s.is_empty()))
                 .unwrap_or_else(|| home_dir().join(".ssh").display().to_string());
 
-            let label = {
-                let target = session.target.read().await;
-                if target.name.is_empty() {
-                    target.host.clone()
-                } else {
-                    target.name.clone()
-                }
-            };
             let dir_path = PathBuf::from(&dir);
             let priv_path = save_key_pair(&dir_path, &gen, &label)?;
             state.invalidate_scan(&dir).await;
@@ -419,11 +474,15 @@ pub async fn add_key(
     session: &Arc<Session>,
     body: &Value,
 ) -> Result<Value, ApiError> {
-    let fresh = resolve_new_key(state, session, body).await?;
-    let mut steps = fresh.steps.clone();
-
     let raw = read_current(session).await?;
     let parsed = parse_authorized_keys(&raw);
+    let existing: Vec<String> = parsed
+        .key_items()
+        .filter_map(|i| i.key().map(|k| k.comment.clone()))
+        .collect();
+
+    let fresh = resolve_new_key(state, session, body, &existing).await?;
+    let mut steps = fresh.steps.clone();
 
     let outcome =
         append_key(&parsed, &fresh.public_key_line).map_err(|e| ApiError::bad(e.to_string()))?;
@@ -498,7 +557,11 @@ pub async fn replace_key(
         ));
     }
 
-    let fresh = resolve_new_key(state, session, body).await?;
+    let existing: Vec<String> = parsed
+        .key_items()
+        .filter_map(|i| i.key().map(|k| k.comment.clone()))
+        .collect();
+    let fresh = resolve_new_key(state, session, body, &existing).await?;
     steps.extend(fresh.steps.clone());
 
     if fresh.fingerprint == old_fp {
@@ -922,4 +985,63 @@ pub async fn set_key_only(session: &Arc<Session>, enable: bool) -> Result<Value,
             "配置已写入，但检测到密码登录状态没变 —— 可能被 sshd_config.d 里的 drop-in 覆盖，请检查该目录"
         },
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{default_key_comment, generated_key_label, unique_key_comment};
+    use serde_json::json;
+
+    #[test]
+    fn generated_key_label_prefers_body_label() {
+        assert_eq!(
+            generated_key_label(&json!({ "label": "HK-01" }), "备注名", "host.example"),
+            "HK-01"
+        );
+        assert_eq!(
+            generated_key_label(&json!({ "label": "   " }), "备注名", "host.example"),
+            "备注名"
+        );
+    }
+
+    #[test]
+    fn generated_key_label_falls_back_to_host() {
+        assert_eq!(
+            generated_key_label(&json!({}), "备注名", "host.example"),
+            "备注名"
+        );
+        assert_eq!(generated_key_label(&json!({}), "", "host.example"), "host.example");
+    }
+
+    #[test]
+    fn default_comment_uses_user_host_and_date() {
+        assert_eq!(
+            default_key_comment("root", "HK-01", "20261103", &[]),
+            "root@HK-01-20261103"
+        );
+    }
+
+    #[test]
+    fn default_comment_appends_sequence_for_same_day() {
+        let existing = vec!["root@HK-01-20261103".to_string()];
+        assert_eq!(
+            default_key_comment("root", "HK-01", "20261103", &existing),
+            "root@HK-01-20261103-2"
+        );
+        let existing = vec![
+            "root@HK-01-20261103".to_string(),
+            "root@HK-01-20261103-2".to_string(),
+        ];
+        assert_eq!(
+            default_key_comment("root", "HK-01", "20261103", &existing),
+            "root@HK-01-20261103-3"
+        );
+    }
+
+    #[test]
+    fn custom_comment_is_deduplicated() {
+        let existing = vec!["my-key".to_string(), "my-key-2".to_string()];
+        assert_eq!(unique_key_comment("my-key", &existing), "my-key-3");
+        assert_eq!(unique_key_comment("fresh", &existing), "fresh");
+    }
 }

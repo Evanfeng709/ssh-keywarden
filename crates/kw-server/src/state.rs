@@ -78,10 +78,9 @@ impl AppState {
         }
         let result = scan_keys(&root, 3);
         if self.scan_cache_ms > 0 {
-            self.scan_cache
-                .lock()
-                .await
-                .insert(dir.to_string(), (Instant::now(), result.clone()));
+            let mut cache = self.scan_cache.lock().await;
+            cache.clear();
+            cache.insert(dir.to_string(), (Instant::now(), result.clone()));
         }
         result
     }

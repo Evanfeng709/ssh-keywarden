@@ -38,7 +38,7 @@ cargo run -p kw-server -- --no-open
 
 # 发布构建
 cargo build --release          # → target/release/kw-desktop.exe
-cargo tauri build              # → target/release/bundle/nsis/SSH Keywarden_<ver>_x64-setup.exe
+makensis -INPUTCHARSET UTF8 scripts\installer.nsi  # → target/release/bundle/nsis/SSH Keywarden_<ver>_x64-setup.exe
 
 # 手机端动态库（Android .so / iOS .a 由各自工具链再交叉编译）
 cargo build -p kw-ffi --release
