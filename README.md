@@ -267,6 +267,19 @@ flutter test                  # 需 KW_FFI_LIB 指向 kw_ffi 动态库，详见 
   备注、加密同步包往返与错误口令拒绝；`terminal_input_test.dart` /
   `terminal_painter_test.dart` 覆盖终端手势与绘制状态。
 
+### 提交钩子（手机端）
+
+仓库带了 `.githooks/pre-commit`：**staged 里有 `mobile/` 文件时自动跑 `flutter test`**，
+不通过就阻止提交。起因是 `kMobileVersion` 漏补零，让 `version_test` 红了三天没人发现。
+
+`core.hooksPath` 是本地配置，新 clone 要手动启用一次：
+
+```bash
+git config core.hooksPath .githooks
+```
+
+改 Rust 文件不触发（0.3 秒过），改手机端多花约 10 秒。确实要跳过用 `git commit --no-verify`。
+
 ## 版本号规则
 
 - 日期制：`v2026.11.3.N`（当天第 N 次），`Cargo.toml` 里存成 `2026.11.3-N`；
