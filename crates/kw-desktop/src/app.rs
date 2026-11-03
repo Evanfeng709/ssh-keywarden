@@ -1873,11 +1873,13 @@ impl eframe::App for KwDesktopApp {
             }
         }
 
-        if self.mode == ViewMode::Monitor {
+        // 监控页要画图表，终端页要喂信息条 —— 两边共用同一个节流
+        if matches!(self.mode, ViewMode::Monitor | ViewMode::Term) {
             self.poll_monitor(false);
         }
 
         self.render_tabbar(ctx);
+        self.render_conn_bar(ctx);
 
         egui::CentralPanel::default()
             .frame(
@@ -1912,15 +1914,16 @@ impl KwDesktopApp {
             .collect();
         let mut switch_to: Option<usize> = None;
         let mut close_at: Option<usize> = None;
+        let mut new_tab = false;
         let font = FontId::proportional(12.0);
 
         egui::TopBottomPanel::top("kw_tabbar")
-            .exact_height(38.0)
+            .exact_height(34.0)
             .frame(
                 Frame::NONE
                     .fill(p.bg_elev)
                     .stroke(Stroke::new(1.0_f32, p.border))
-                    .inner_margin(Margin::symmetric(10, 7)),
+                    .inner_margin(Margin::symmetric(10, 5)),
             )
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
@@ -1934,17 +1937,21 @@ impl KwDesktopApp {
                         let (rect, resp) =
                             ui.allocate_exact_size(Vec2::new(text_w + 38.0, 24.0), Sense::click());
 
-                        ui.painter().rect_filled(
-                            rect,
-                            CornerRadius::same(6),
-                            if *active { p.accent_soft } else { p.surface3 },
-                        );
                         if *active {
-                            ui.painter().rect_stroke(
+                            // 活动标签：稍亮底 + 底部 2px 强调线（Netcatty 的质感就来自这条线）
+                            ui.painter()
+                                .rect_filled(rect, CornerRadius::same(6), p.surface3);
+                            let line = Rect::from_min_max(
+                                Pos2::new(rect.left() + 7.0, rect.bottom() - 2.0),
+                                Pos2::new(rect.right() - 7.0, rect.bottom()),
+                            );
+                            ui.painter()
+                                .rect_filled(line, CornerRadius::same(1), p.accent);
+                        } else if resp.hovered() {
+                            ui.painter().rect_filled(
                                 rect,
                                 CornerRadius::same(6),
-                                Stroke::new(1.0_f32, p.accent),
-                                StrokeKind::Inside,
+                                p.surface3.linear_multiply(0.55),
                             );
                         }
 
@@ -1988,6 +1995,11 @@ impl KwDesktopApp {
                             close_at = Some(i);
                         }
                     }
+
+                    // ＋ 新建：回主机页挑一台（选中后点「打开终端」就会新建标签）
+                    if Self::tiny_btn(ui, "＋", p.dim) {
+                        new_tab = true;
+                    }
                 });
             });
 
@@ -1999,6 +2011,196 @@ impl KwDesktopApp {
         }
         if let Some(i) = close_at {
             self.close_tab(i);
+        }
+        if new_tab {
+            self.switch_mode(ViewMode::Keys);
+        }
+    }
+
+    /// 标签栏下方的连接信息条：连接身份 + 系统指标。
+    /// 布局照 Netcatty：左边你是谁，右边这台机器累不累。
+    fn render_conn_bar(&mut self, ctx: &egui::Context) {
+        if self.session.is_none() || self.tabs.is_empty() {
+            return;
+        }
+        let p = self.palette;
+
+        let endpoint = self
+            .session
+            .as_ref()
+            .and_then(|s| s.get("host"))
+            .map(|h| {
+                format!(
+                    "{}@{}",
+                    h.get("username").and_then(|v| v.as_str()).unwrap_or("root"),
+                    h.get("host").and_then(|v| v.as_str()).unwrap_or("")
+                )
+            })
+            .unwrap_or_else(|| "SSH".to_string());
+
+        let mut metrics: Vec<String> = Vec::new();
+        if let Some(s) = &self.mon_snap {
+            metrics.push(format!("CPU {:.0}% ({}C)", s.cpu.total, s.cores));
+            metrics.push(format!(
+                "内存 {}/{}",
+                Self::fmt_bytes(s.mem.used),
+                Self::fmt_bytes(s.mem.total)
+            ));
+            if let Some(d) = s.disks.first() {
+                metrics.push(format!(
+                    "{} {}/{} ({:.0}%)",
+                    d.mount,
+                    Self::fmt_bytes(d.used),
+                    Self::fmt_bytes(d.total),
+                    d.percent
+                ));
+            }
+            metrics.push(format!(
+                "↓{} ↑{}",
+                Self::fmt_rate(s.net.rx_bytes_per_sec),
+                Self::fmt_rate(s.net.tx_bytes_per_sec)
+            ));
+        }
+
+        let mut do_copy = false;
+        let mut act: Option<u8> = None;
+        let mut snippet: Option<&'static str> = None;
+
+        egui::TopBottomPanel::top("kw_connbar")
+            .exact_height(26.0)
+            .frame(
+                Frame::NONE
+                    .fill(p.bg_elev)
+                    .stroke(Stroke::new(1.0_f32, p.border))
+                    .inner_margin(Margin::symmetric(10, 3)),
+            )
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 7.0;
+                    ui.label(
+                        RichText::new(&endpoint)
+                            .size(11.0)
+                            .monospace()
+                            .color(p.text),
+                    );
+                    if ui
+                        .add(
+                            egui::Button::new(RichText::new("⧉").size(11.0).color(p.faint))
+                                .frame(false),
+                        )
+                        .on_hover_text("复制 user@host")
+                        .clicked()
+                    {
+                        do_copy = true;
+                    }
+
+                    ui.label(RichText::new("│").size(11.0).color(p.border));
+
+                    if metrics.is_empty() {
+                        ui.label(RichText::new("指标加载中…").size(10.5).color(p.faint));
+                    } else {
+                        for m in &metrics {
+                            ui.label(RichText::new(m).size(10.5).color(p.dim));
+                        }
+                    }
+
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        ui.spacing_mut().item_spacing.x = 4.0;
+                        if Self::tiny_btn(ui, "断开", p.danger) {
+                            act = Some(1);
+                        }
+                        if Self::tiny_btn(ui, "重连", p.dim) {
+                            act = Some(2);
+                        }
+                        if Self::tiny_btn(ui, "清屏", p.dim) {
+                            act = Some(3);
+                        }
+                        if Self::tiny_btn(ui, "粘贴", p.dim) {
+                            act = Some(4);
+                        }
+                        if Self::tiny_btn(ui, "复制全屏", p.dim) {
+                            act = Some(5);
+                        }
+                        // 原来占半行的 5 个快捷指令按钮，收进这个菜单
+                        ui.menu_button(RichText::new("⚡").size(11.0).color(p.dim), |ui| {
+                            for (lbl, cmd) in SNIPPETS {
+                                if ui.button(lbl).clicked() {
+                                    snippet = Some(cmd);
+                                    ui.close_menu();
+                                }
+                            }
+                        });
+                    });
+                });
+            });
+
+        if do_copy {
+            self.copy_to_clipboard(&endpoint, "连接地址");
+        }
+        if let Some(cmd) = snippet {
+            self.send_term_bytes(cmd.as_bytes());
+            self.term_focused = true;
+        }
+        match act {
+            Some(1) => self.disconnect_session(),
+            Some(2) => self.open_pty(),
+            Some(3) => {
+                self.vt.clear_scrollback();
+                self.send_term_bytes(b"\x0c");
+            }
+            Some(4) => {
+                let txt = self.read_from_clipboard();
+                if !txt.is_empty() {
+                    self.send_term_bytes(txt.as_bytes());
+                }
+            }
+            Some(5) => {
+                let dump = self.vt.all_text();
+                self.copy_to_clipboard(&dump, "终端屏幕内容");
+            }
+            _ => {}
+        }
+    }
+
+    /// 信息条上的小号文字按钮（无边框，hover 变色）。
+    fn tiny_btn(ui: &mut egui::Ui, label: &str, color: Color32) -> bool {
+        ui.add(
+            egui::Button::new(RichText::new(label).size(10.5).color(color))
+                .fill(Color32::TRANSPARENT)
+                .stroke(Stroke::NONE)
+                .corner_radius(CornerRadius::same(4)),
+        )
+        .clicked()
+    }
+
+    /// 把字节数压成 1.2G / 340M / 9K 这类短串。
+    fn fmt_bytes(v: f64) -> String {
+        const K: f64 = 1024.0;
+        const M: f64 = K * 1024.0;
+        const G: f64 = M * 1024.0;
+        const T: f64 = G * 1024.0;
+        if !v.is_finite() || v <= 0.0 {
+            return "0".to_string();
+        }
+        if v >= T {
+            format!("{:.1}T", v / T)
+        } else if v >= G {
+            format!("{:.1}G", v / G)
+        } else if v >= M {
+            format!("{:.0}M", v / M)
+        } else if v >= K {
+            format!("{:.0}K", v / K)
+        } else {
+            format!("{:.0}B", v)
+        }
+    }
+
+    /// 速率（字节/秒）。
+    fn fmt_rate(v: f64) -> String {
+        if !v.is_finite() || v <= 0.0 {
+            "0".to_string()
+        } else {
+            format!("{}/s", Self::fmt_bytes(v))
         }
     }
 
@@ -4427,81 +4629,7 @@ impl KwDesktopApp {
         }
 
         let term_active = self.term_id.is_some();
-        let endpoint = self
-            .session
-            .as_ref()
-            .and_then(|s| s.get("host"))
-            .map(|h| {
-                format!(
-                    "{}@{}:{}",
-                    h.get("username").and_then(|v| v.as_str()).unwrap_or("root"),
-                    h.get("host").and_then(|v| v.as_str()).unwrap_or(""),
-                    h.get("port").and_then(|v| v.as_u64()).unwrap_or(22)
-                )
-            })
-            .unwrap_or_else(|| "SSH 终端".to_string());
-
-        Frame::NONE
-            .fill(p.panel)
-            .stroke(Stroke::new(1.0_f32, p.border))
-            .corner_radius(CornerRadius::same(10))
-            .inner_margin(Margin::symmetric(12, 8))
-            .show(ui, |ui| {
-                ui.horizontal_wrapped(|ui| {
-                    let dot_col = if term_active { p.ok } else { p.warn };
-                    let (dot_rect, _) = ui.allocate_exact_size(Vec2::new(8.0, 8.0), Sense::hover());
-                    ui.painter().circle_filled(dot_rect.center(), 4.0, dot_col);
-
-                    ui.label(
-                        RichText::new(&endpoint)
-                            .size(13.0)
-                            .monospace()
-                            .strong()
-                            .color(p.text),
-                    );
-
-                    ui.separator();
-                    ui.label(RichText::new("快捷指令:").size(11.5).color(p.dim));
-                    for (lbl, cmd) in SNIPPETS {
-                        if ui
-                            .add(
-                                egui::Button::new(RichText::new(lbl).size(11.0).color(p.text))
-                                    .fill(p.surface3)
-                                    .stroke(Stroke::new(1.0_f32, p.border))
-                                    .corner_radius(CornerRadius::same(6)),
-                            )
-                            .clicked()
-                        {
-                            self.send_term_bytes(cmd.as_bytes());
-                            self.term_focused = true;
-                        }
-                    }
-
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        if Self::action_btn(ui, &p, "断开会话", false, true).clicked() {
-                            self.disconnect_session();
-                        }
-                        if Self::action_btn(ui, &p, "重连终端", false, false).clicked() {
-                            self.open_pty();
-                        }
-                        if Self::action_btn(ui, &p, "清屏", false, false).clicked() {
-                            self.vt.clear_scrollback();
-                            self.send_term_bytes(b"\x0c");
-                        }
-                        if Self::action_btn(ui, &p, "粘贴", false, false).clicked() {
-                            let txt = self.read_from_clipboard();
-                            if !txt.is_empty() {
-                                self.send_term_bytes(txt.as_bytes());
-                            }
-                        }
-                        if Self::action_btn(ui, &p, "复制全屏", false, false).clicked() {
-                            let dump = self.vt.all_text();
-                            self.copy_to_clipboard(&dump, "终端屏幕内容");
-                        }
-                    });
-                });
-            });
-
+        // 连接身份与操作按钮都移到顶部信息条（render_conn_bar）了
         ui.add_space(8.0);
 
         let avail = ui.available_size();
